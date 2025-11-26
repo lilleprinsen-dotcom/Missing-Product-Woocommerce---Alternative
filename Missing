@@ -15,7 +15,11 @@ class LP_Missing_Product_Handler {
     const OPTION_PORTAL_URL = 'lp_missing_portal_url';
     const OPTION_SETTINGS = 'lp_missing_settings';
     const OPTION_ATTENTION_FLAG = '_lp_missing_needs_attention';
+    const OPTION_HAS_MISSING_DATA = '_lp_missing_has_data';
+    const OPTION_HAS_OPEN_MISSING = '_lp_missing_has_open';
     const CLEANUP_HOOK = 'lp_missing_cleanup_order';
+    const DAILY_CLEANUP_HOOK = 'lp_missing_daily_cleanup';
+    const DAILY_CLEANUP_LIMIT = 25;
     const CLEANUP_MIN_DAYS = 7;
     const AJAX_NONCE_ACTION = 'lp_missing_admin';
     const SHORTCODE = 'lp_missing_items';
@@ -47,6 +51,12 @@ class LP_Missing_Product_Handler {
         add_action( 'admin_post_lp_missing_save_settings', array( __CLASS__, 'handle_settings_save' ) );
         add_action( self::CLEANUP_HOOK, array( __CLASS__, 'handle_cleanup_order' ) );
         add_action( 'admin_post_lp_missing_apply_decision', array( __CLASS__, 'handle_apply_decision' ) );
+        add_action( 'init', array( __CLASS__, 'maybe_schedule_daily_cleanup' ) );
+        add_action( self::DAILY_CLEANUP_HOOK, array( __CLASS__, 'run_daily_cleanup' ) );
+        add_filter( 'views_edit-shop_order', array( __CLASS__, 'add_missing_orders_view' ) );
+        add_filter( 'request', array( __CLASS__, 'filter_missing_orders_view' ) );
+        add_filter( 'manage_edit-shop_order_columns', array( __CLASS__, 'register_missing_column' ) );
+        add_action( 'manage_shop_order_posts_custom_column', array( __CLASS__, 'render_missing_column' ), 10, 2 );
     }
 
     public static function add_metabox() {
@@ -488,6 +498,72 @@ JS;
             }
         }
         return false;
+    }
+
+    protected static function order_has_open_missing_items( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return false;
+        }
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! empty( $data['missing'] ) && ! self::is_line_resolved( $data ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected static function refresh_order_flags( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+
+        $has_data       = false;
+        $has_open       = false;
+        $needs_attention = false;
+
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            $data        = self::get_item_data( $item );
+            $meta_exists = metadata_exists( 'order_item', $item->get_id(), self::META_KEY );
+
+            if ( $meta_exists || ! empty( $data['missing'] ) ) {
+                $has_data = true;
+            }
+
+            if ( ! empty( $data['needs_attention'] ) ) {
+                $needs_attention = true;
+            }
+
+            if ( ! empty( $data['missing'] ) && ! self::is_line_resolved( $data ) ) {
+                $has_open = true;
+            }
+        }
+
+        $updated = false;
+
+        if ( $needs_attention ) {
+            $order->update_meta_data( self::OPTION_ATTENTION_FLAG, 'yes' );
+        } else {
+            $order->delete_meta_data( self::OPTION_ATTENTION_FLAG );
+        }
+
+        if ( $has_data ) {
+            $order->update_meta_data( self::OPTION_HAS_MISSING_DATA, 'yes' );
+        } else {
+            $order->delete_meta_data( self::OPTION_HAS_MISSING_DATA );
+        }
+
+        if ( $has_open ) {
+            $order->update_meta_data( self::OPTION_HAS_OPEN_MISSING, 'yes' );
+        } else {
+            $order->delete_meta_data( self::OPTION_HAS_OPEN_MISSING );
+        }
+
+        $updated = true;
+
+        if ( $updated ) {
+            $order->save();
+        }
     }
 
     protected static function send_customer_email( $order ) {
@@ -990,6 +1066,8 @@ JS;
                 $item->save();
             }
         }
+
+        self::refresh_order_flags( $order );
     }
 
     protected static function maybe_adjust_stock( $item, $existing, &$new_data, $order ) {
@@ -1135,24 +1213,106 @@ JS;
         wp_schedule_single_event( $next_time, self::CLEANUP_HOOK, array( $order->get_id() ) );
     }
 
-    protected static function refresh_order_attention_flag( $order ) {
+    public static function maybe_schedule_daily_cleanup() {
+        if ( ! wp_next_scheduled( self::DAILY_CLEANUP_HOOK ) ) {
+            wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', self::DAILY_CLEANUP_HOOK );
+        }
+    }
+
+    protected static function get_order_last_activity_timestamp( $order ) {
         if ( ! $order instanceof WC_Order ) {
+            return 0;
+        }
+
+        $modified = $order->get_date_modified();
+        $created  = $order->get_date_created();
+
+        $modified_ts = $modified ? $modified->getTimestamp() : 0;
+        $created_ts  = $created ? $created->getTimestamp() : 0;
+
+        return max( $modified_ts, $created_ts );
+    }
+
+    protected static function purge_missing_data_for_order( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return false;
+        }
+
+        $changed = false;
+
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            if ( ! metadata_exists( 'order_item', $item->get_id(), self::META_KEY ) ) {
+                continue;
+            }
+            $item->delete_meta_data( self::META_KEY );
+            $item->save();
+            $changed = true;
+        }
+
+        if ( $changed ) {
+            while ( $existing = wp_next_scheduled( self::CLEANUP_HOOK, array( $order->get_id() ) ) ) {
+                wp_unschedule_event( $existing, self::CLEANUP_HOOK, array( $order->get_id() ) );
+            }
+            $order->delete_meta_data( self::OPTION_ATTENTION_FLAG );
+            $order->delete_meta_data( self::OPTION_HAS_OPEN_MISSING );
+            $order->delete_meta_data( self::OPTION_HAS_MISSING_DATA );
+            $order->save();
+        }
+
+        return $changed;
+    }
+
+    public static function run_daily_cleanup() {
+        $settings  = self::get_settings();
+        $threshold = max( self::CLEANUP_MIN_DAYS, absint( $settings['cleanup_resolved_after_days'] ) ) * DAY_IN_SECONDS;
+        $limit     = apply_filters( 'lp_missing_daily_cleanup_limit', self::DAILY_CLEANUP_LIMIT );
+
+        $orders = wc_get_orders( array(
+            'limit'      => $limit,
+            'return'     => 'objects',
+            'orderby'    => 'date_modified',
+            'order'      => 'ASC',
+            'meta_query' => array(
+                'relation' => 'OR',
+                array(
+                    'key'     => self::OPTION_HAS_MISSING_DATA,
+                    'value'   => 'yes',
+                    'compare' => '=',
+                ),
+                array(
+                    'key'     => self::OPTION_ATTENTION_FLAG,
+                    'value'   => 'yes',
+                    'compare' => '=',
+                ),
+            ),
+        ) );
+
+        if ( empty( $orders ) ) {
             return;
         }
-        $needs_attention = false;
-        foreach ( $order->get_items( 'line_item' ) as $item ) {
-            $data = self::get_item_data( $item );
-            if ( ! empty( $data['needs_attention'] ) ) {
-                $needs_attention = true;
-                break;
+
+        foreach ( $orders as $order ) {
+            if ( self::order_has_open_missing_items( $order ) ) {
+                continue;
+            }
+
+            $last_activity = self::get_order_last_activity_timestamp( $order );
+            if ( ! $last_activity ) {
+                continue;
+            }
+
+            if ( ( time() - $last_activity ) < $threshold ) {
+                continue;
+            }
+
+            if ( self::purge_missing_data_for_order( $order ) ) {
+                $order->add_order_note( __( 'Missing-item data automatically cleaned up after resolution.', 'lp-missing' ) );
             }
         }
-        if ( $needs_attention ) {
-            $order->update_meta_data( self::OPTION_ATTENTION_FLAG, 'yes' );
-        } else {
-            $order->delete_meta_data( self::OPTION_ATTENTION_FLAG );
-        }
-        $order->save();
+    }
+
+    protected static function refresh_order_attention_flag( $order ) {
+        self::refresh_order_flags( $order );
     }
 
     public static function handle_item_updated( $order, $item_id, $new_data, $old_data ) {
@@ -1590,7 +1750,7 @@ JS;
             }
         }
         if ( empty( $missing_items ) ) {
-            return '<div class="lp-missing-portal-empty">' . esc_html__( 'No missing items on this order.', 'lp-missing' ) . '</div>';
+            return '<div class="lp-missing-portal-empty">' . esc_html__( 'Nothing is waiting for your decision.', 'lp-missing' ) . '</div>';
         }
 
         $alt_products = array();
@@ -1684,6 +1844,110 @@ JS;
         }
         echo '</div>';
         return ob_get_clean();
+    }
+
+    protected static function count_orders_with_missing_meta( $meta_query ) {
+        $result = wc_get_orders( array(
+            'limit'      => 1,
+            'paginate'   => true,
+            'return'     => 'ids',
+            'meta_query' => $meta_query,
+        ) );
+
+        if ( is_array( $result ) && isset( $result['total'] ) ) {
+            return absint( $result['total'] );
+        }
+
+        if ( is_object( $result ) && isset( $result->total ) ) {
+            return absint( $result->total );
+        }
+
+        return 0;
+    }
+
+    public static function add_missing_orders_view( $views ) {
+        $meta_query = array(
+            'relation' => 'OR',
+            array(
+                'key'     => self::OPTION_HAS_OPEN_MISSING,
+                'value'   => 'yes',
+                'compare' => '=',
+            ),
+            array(
+                'key'     => self::OPTION_ATTENTION_FLAG,
+                'value'   => 'yes',
+                'compare' => '=',
+            ),
+        );
+
+        $count = self::count_orders_with_missing_meta( $meta_query );
+        $url   = add_query_arg( 'lp_missing_view', 'open', admin_url( 'edit.php?post_type=shop_order' ) );
+        $class = ( isset( $_GET['lp_missing_view'] ) && 'open' === $_GET['lp_missing_view'] ) ? 'class="current"' : '';
+
+        $views['lp_missing'] = '<a href="' . esc_url( $url ) . '" ' . $class . '>' . esc_html( sprintf( __( 'Missing items (%d)', 'lp-missing' ), $count ) ) . '</a>';
+        return $views;
+    }
+
+    public static function filter_missing_orders_view( $vars ) {
+        if ( empty( $_GET['lp_missing_view'] ) || 'open' !== $_GET['lp_missing_view'] ) {
+            return $vars;
+        }
+
+        $meta_query   = isset( $vars['meta_query'] ) ? (array) $vars['meta_query'] : array();
+        $meta_query[] = array(
+            'relation' => 'OR',
+            array(
+                'key'     => self::OPTION_HAS_OPEN_MISSING,
+                'value'   => 'yes',
+                'compare' => '=',
+            ),
+            array(
+                'key'     => self::OPTION_ATTENTION_FLAG,
+                'value'   => 'yes',
+                'compare' => '=',
+            ),
+        );
+
+        $vars['meta_query'] = $meta_query;
+        return $vars;
+    }
+
+    public static function register_missing_column( $columns ) {
+        $columns['lp_missing_status'] = __( 'Missing items', 'lp-missing' );
+        return $columns;
+    }
+
+    public static function render_missing_column( $column, $post_id ) {
+        if ( 'lp_missing_status' !== $column ) {
+            return;
+        }
+
+        $order = wc_get_order( $post_id );
+        if ( ! $order ) {
+            echo '&mdash;';
+            return;
+        }
+
+        $has_open   = 'yes' === $order->get_meta( self::OPTION_HAS_OPEN_MISSING );
+        $attention  = 'yes' === $order->get_meta( self::OPTION_ATTENTION_FLAG );
+        $has_data   = 'yes' === $order->get_meta( self::OPTION_HAS_MISSING_DATA );
+
+        if ( $has_open ) {
+            echo '<span class="dashicons dashicons-warning" style="color:#d63638;" aria-hidden="true"></span> ' . esc_html__( 'Awaiting resolution', 'lp-missing' );
+            return;
+        }
+
+        if ( $attention ) {
+            echo '<span class="dashicons dashicons-flag" style="color:#d63638;" aria-hidden="true"></span> ' . esc_html__( 'Needs follow-up', 'lp-missing' );
+            return;
+        }
+
+        if ( $has_data ) {
+            echo '<span class="dashicons dashicons-yes-alt" style="color:#2271b1;" aria-hidden="true"></span> ' . esc_html__( 'Resolved (cleanup pending)', 'lp-missing' );
+            return;
+        }
+
+        echo '&mdash;';
     }
 }
 
