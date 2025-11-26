@@ -11,6 +11,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 class LP_Missing_Product_Handler {
     const META_KEY = '_lp_missing_data';
     const OPTION_ENABLE_STOCK = 'lp_missing_enable_stock_log';
+    const OPTION_SECRET = 'lp_missing_secret';
+    const OPTION_PORTAL_URL = 'lp_missing_portal_url';
     const AJAX_NONCE_ACTION = 'lp_missing_admin';
     const SHORTCODE = 'lp_missing_items';
 
@@ -20,6 +22,9 @@ class LP_Missing_Product_Handler {
         add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_admin_scripts' ) );
         add_action( 'wp_ajax_lp_missing_search_products', array( __CLASS__, 'ajax_search_products' ) );
         add_action( 'wp_ajax_lp_missing_preview_product', array( __CLASS__, 'ajax_preview_product' ) );
+        add_action( 'admin_post_lp_missing_send_email', array( __CLASS__, 'handle_admin_send_email' ) );
+        add_action( 'admin_notices', array( __CLASS__, 'admin_notices' ) );
+        add_filter( 'woocommerce_email_classes', array( __CLASS__, 'register_email_class' ) );
         add_shortcode( self::SHORTCODE, array( __CLASS__, 'render_shortcode' ) );
     }
 
@@ -139,6 +144,12 @@ class LP_Missing_Product_Handler {
             echo '</div>';
             echo '</div>';
         }
+        if ( self::order_has_missing_items( $order ) ) {
+            $send_url = wp_nonce_url( admin_url( 'admin-post.php?action=lp_missing_send_email&order_id=' . $order->get_id() ), 'lp_missing_send_email_' . $order->get_id() );
+            echo '<div class="lp-missing-admin-actions" style="margin-top:12px;">';
+            echo '<a class="button" href="' . esc_url( $send_url ) . '">' . esc_html__( 'Send customer portal email', 'lp-missing' ) . '</a>';
+            echo '</div>';
+        }
         echo '</div>';
     }
 
@@ -233,6 +244,137 @@ JS;
     protected static function stock_lock_enabled() {
         $enabled = get_option( self::OPTION_ENABLE_STOCK, 'yes' );
         return apply_filters( 'lp_missing_enable_stock_log', 'yes' === $enabled );
+    }
+
+    protected static function get_secret() {
+        $secret = (string) get_option( self::OPTION_SECRET, '' );
+        if ( empty( $secret ) ) {
+            $secret = wp_generate_password( 64, true, true );
+            add_option( self::OPTION_SECRET, $secret, '', false );
+        }
+        return $secret;
+    }
+
+    protected static function generate_signature( $order_id, $email ) {
+        if ( ! $order_id || ! $email ) {
+            return '';
+        }
+        $data = $order_id . '|' . strtolower( (string) $email );
+        return hash_hmac( 'sha256', $data, self::get_secret() );
+    }
+
+    protected static function validate_signature( $order_id, $email, $key ) {
+        if ( ! $order_id || ! $email || ! $key ) {
+            return false;
+        }
+        $expected = self::generate_signature( $order_id, $email );
+        return hash_equals( $expected, (string) $key );
+    }
+
+    protected static function get_portal_base_url() {
+        $configured = trim( (string) get_option( self::OPTION_PORTAL_URL, '' ) );
+        $base_url  = $configured ? $configured : wc_get_page_permalink( 'myaccount' );
+        if ( ! $base_url ) {
+            $base_url = home_url( '/' );
+        }
+        return apply_filters( 'lp_missing_portal_base_url', $base_url );
+    }
+
+    public static function get_magic_link_for_order( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+        $args = array(
+            'oid' => $order->get_id(),
+            'key' => self::generate_signature( $order->get_id(), $order->get_billing_email() ),
+        );
+        return add_query_arg( $args, self::get_portal_base_url() );
+    }
+
+    public static function order_has_missing_items( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return false;
+        }
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! empty( $data['missing'] ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected static function send_customer_email( $order ) {
+        if ( ! $order instanceof WC_Order || ! self::order_has_missing_items( $order ) ) {
+            return false;
+        }
+        $mailer = WC()->mailer();
+        if ( ! $mailer ) {
+            return false;
+        }
+        $emails = $mailer->get_emails();
+        if ( empty( $emails['lp_missing_customer_email'] ) ) {
+            return false;
+        }
+        $emails['lp_missing_customer_email']->trigger( $order->get_id() );
+        return true;
+    }
+
+    public static function handle_admin_send_email() {
+        $order_id = isset( $_GET['order_id'] ) ? absint( $_GET['order_id'] ) : 0;
+        if ( ! $order_id ) {
+            wp_die( esc_html__( 'Invalid order.', 'lp-missing' ) );
+        }
+        if ( ! current_user_can( 'edit_shop_order', $order_id ) ) {
+            wp_die( esc_html__( 'You do not have permission to send this email.', 'lp-missing' ) );
+        }
+        $nonce = isset( $_GET['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ) : '';
+        if ( ! wp_verify_nonce( $nonce, 'lp_missing_send_email_' . $order_id ) ) {
+            wp_die( esc_html__( 'Security check failed.', 'lp-missing' ) );
+        }
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            wp_die( esc_html__( 'Order not found.', 'lp-missing' ) );
+        }
+
+        $result = 'missing';
+        if ( self::order_has_missing_items( $order ) ) {
+            $result = self::send_customer_email( $order ) ? 'sent' : 'failed';
+        }
+
+        wp_safe_redirect( add_query_arg( array( 'lp_missing_email_sent' => $result ), get_edit_post_link( $order_id, 'url' ) ) );
+        exit;
+    }
+
+    public static function admin_notices() {
+        if ( empty( $_GET['lp_missing_email_sent'] ) ) {
+            return;
+        }
+        if ( ! function_exists( 'get_current_screen' ) ) {
+            return;
+        }
+        $screen = get_current_screen();
+        if ( empty( $screen->id ) || 'shop_order' !== $screen->id ) {
+            return;
+        }
+        $status = sanitize_text_field( wp_unslash( $_GET['lp_missing_email_sent'] ) );
+        if ( 'sent' === $status ) {
+            $message = __( 'Missing items email sent to the customer.', 'lp-missing' );
+        } elseif ( 'missing' === $status ) {
+            $message = __( 'No missing items were found for this order.', 'lp-missing' );
+        } elseif ( 'failed' === $status ) {
+            $message = __( 'The email could not be sent. Please check email settings.', 'lp-missing' );
+        } else {
+            $message = '';
+        }
+        if ( $message ) {
+            echo '<div class="notice notice-success is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
+        }
+    }
+
+    public static function register_email_class( $emails ) {
+        $emails['lp_missing_customer_email'] = new LP_Missing_Product_Email();
+        return $emails;
     }
 
     public static function save_metabox( $post_id, $post ) {
@@ -406,6 +548,49 @@ JS;
         return array( $order, $email );
     }
 
+    protected static function get_order_from_magic_link() {
+        $order_id = isset( $_GET['oid'] ) ? absint( $_GET['oid'] ) : 0;
+        $key      = isset( $_GET['key'] ) ? sanitize_text_field( wp_unslash( $_GET['key'] ) ) : '';
+        if ( ! $order_id || ! $key ) {
+            return array( null, '', '' );
+        }
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            return array( null, '', __( 'This link is invalid or expired.', 'lp-missing' ) );
+        }
+        if ( ! self::validate_signature( $order_id, $order->get_billing_email(), $key ) ) {
+            return array( null, '', __( 'This link is invalid or expired.', 'lp-missing' ) );
+        }
+        return array( $order, $order->get_billing_email(), '' );
+    }
+
+    protected static function verify_customer_email( $order, &$error ) {
+        $error         = '';
+        $billing_email = $order->get_billing_email();
+        if ( ! $billing_email ) {
+            return false;
+        }
+        if ( is_user_logged_in() ) {
+            $user = wp_get_current_user();
+            if ( $user && strtolower( $user->user_email ) === strtolower( $billing_email ) ) {
+                return true;
+            }
+        }
+        if ( isset( $_POST['lp_missing_verify_email'] ) ) {
+            $nonce = isset( $_POST['lp_missing_verify_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['lp_missing_verify_nonce'] ) ) : '';
+            if ( ! wp_verify_nonce( $nonce, 'lp_missing_verify_' . $order->get_id() ) ) {
+                $error = __( 'Security check failed. Please try again.', 'lp-missing' );
+                return false;
+            }
+            $submitted = sanitize_email( wp_unslash( $_POST['lp_missing_verify_email'] ) );
+            if ( $submitted && strtolower( $submitted ) === strtolower( $billing_email ) ) {
+                return true;
+            }
+            $error = __( 'Email does not match our records for this order.', 'lp-missing' );
+        }
+        return false;
+    }
+
     protected static function rate_limit_key( $order_id, $email ) {
         return 'lp_missing_rate_' . $order_id . '_' . md5( strtolower( $email ) );
     }
@@ -416,6 +601,9 @@ JS;
         }
         if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lp_missing_nonce'] ) ), 'lp_missing_portal_' . $order->get_id() ) ) {
             return array( 'message' => __( 'Security check failed.', 'lp-missing' ), 'status' => 'error' );
+        }
+        if ( strtolower( $order->get_billing_email() ) !== strtolower( $email ) ) {
+            return array( 'message' => __( 'Email does not match this order.', 'lp-missing' ), 'status' => 'error' );
         }
         $key = self::rate_limit_key( $order->get_id(), $email );
         $count = (int) get_transient( $key );
@@ -480,11 +668,42 @@ JS;
             'email'    => '',
         ), $atts, self::SHORTCODE );
 
-        list( $order, $email ) = self::get_order_for_shortcode( $atts );
-        if ( ! $order ) {
-            return '<div class="lp-missing-portal-error">' . esc_html__( 'Order not found or email does not match.', 'lp-missing' ) . '</div>';
+        list( $order, $email, $link_error ) = self::get_order_from_magic_link();
+        $using_magic   = $order instanceof WC_Order;
+        $verify_error  = '';
+        $response      = array( 'message' => '', 'status' => '' );
+
+        if ( $link_error ) {
+            return '<div class="lp-missing-portal-error">' . esc_html( $link_error ) . '</div>';
         }
 
+        if ( ! $using_magic ) {
+            list( $order, $email ) = self::get_order_for_shortcode( $atts );
+            if ( ! $order ) {
+                return '<div class="lp-missing-portal-error">' . esc_html__( 'Order not found or email does not match.', 'lp-missing' ) . '</div>';
+            }
+            $email_verified = true;
+        } else {
+            $email_verified = self::verify_customer_email( $order, $verify_error );
+        }
+
+        if ( $using_magic && ! $email_verified ) {
+            ob_start();
+            if ( $verify_error ) {
+                echo '<div class="lp-missing-portal-error">' . esc_html( $verify_error ) . '</div>';
+            }
+            echo '<div class="lp-missing-portal-verify">';
+            echo '<p>' . esc_html__( 'Please confirm the email you used at checkout to continue.', 'lp-missing' ) . '</p>';
+            echo '<form method="post">';
+            wp_nonce_field( 'lp_missing_verify_' . $order->get_id(), 'lp_missing_verify_nonce' );
+            echo '<label>' . esc_html__( 'Email address', 'lp-missing' ) . ' <input type="email" name="lp_missing_verify_email" required /></label> ';
+            echo '<button type="submit">' . esc_html__( 'Continue', 'lp-missing' ) . '</button>';
+            echo '</form>';
+            echo '</div>';
+            return ob_get_clean();
+        }
+
+        $email    = $order->get_billing_email();
         $response = self::handle_portal_action( $order, $email );
         $items    = $order->get_items( 'line_item' );
         $missing_items = array();
@@ -581,6 +800,66 @@ JS;
         }
         echo '</div>';
         return ob_get_clean();
+    }
+}
+
+class LP_Missing_Product_Email extends WC_Email {
+
+    public function __construct() {
+        $this->id             = 'lp_missing_customer_email';
+        $this->customer_email = true;
+        $this->title          = __( 'Missing items customer portal', 'lp-missing' );
+        $this->description    = __( 'Email prompting customers to review missing item options via the secure portal.', 'lp-missing' );
+        $this->heading        = __( 'Action needed for your order', 'lp-missing' );
+        $this->subject        = __( 'Items missing from your order #{order_number}', 'lp-missing' );
+        $this->placeholders   = array(
+            '{order_number}' => '',
+            '{magic_link}'   => '',
+        );
+        parent::__construct();
+    }
+
+    public function trigger( $order_id ) {
+        $order = wc_get_order( $order_id );
+        if ( ! $order || ! LP_Missing_Product_Handler::order_has_missing_items( $order ) ) {
+            return;
+        }
+        $this->object     = $order;
+        $this->recipient  = $order->get_billing_email();
+        $this->placeholders['{order_number}'] = $order->get_order_number();
+        $this->placeholders['{magic_link}']   = LP_Missing_Product_Handler::get_magic_link_for_order( $order );
+
+        if ( ! $this->is_enabled() || ! $this->get_recipient() ) {
+            return;
+        }
+
+        $this->send( $this->get_recipient(), $this->get_subject(), $this->get_content(), $this->get_headers(), $this->get_attachments() );
+    }
+
+    public function get_content_html() {
+        ob_start();
+        wc_get_template( 'emails/email-header.php', array( 'email_heading' => $this->get_heading(), 'email' => $this ) );
+        ?>
+        <p><?php printf( esc_html__( 'Some items in your order %s are unavailable.', 'lp-missing' ), esc_html( $this->object->get_order_number() ) ); ?></p>
+        <p><?php esc_html_e( 'Please review your options using the secure link below.', 'lp-missing' ); ?></p>
+        <p>
+            <a class="button" href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php esc_html_e( 'Review options', 'lp-missing' ); ?></a>
+        </p>
+        <p><?php esc_html_e( 'If the button does not work, copy and paste this link into your browser:', 'lp-missing' ); ?><br />
+            <a href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php echo esc_html( $this->placeholders['{magic_link}'] ); ?></a>
+        </p>
+        <?php
+        wc_get_template( 'emails/email-footer.php', array( 'email' => $this ) );
+        return ob_get_clean();
+    }
+
+    public function get_content_plain() {
+        $lines = array(
+            sprintf( __( 'Some items in your order %s are unavailable.', 'lp-missing' ), $this->object->get_order_number() ),
+            __( 'Please review your options using the secure link below.', 'lp-missing' ),
+            $this->placeholders['{magic_link}'],
+        );
+        return implode( "\n\n", $lines );
     }
 }
 
