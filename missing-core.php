@@ -1,0 +1,2080 @@
+<?php
+// Core implementation for Missing Product WooCommerce Alternative. Loaded only when WooCommerce is available.
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+class LP_Missing_Product_Handler {
+    const META_KEY = '_lp_missing_data';
+    const OPTION_ENABLE_STOCK = 'lp_missing_enable_stock_log';
+    const OPTION_SECRET = 'lp_missing_secret';
+    const OPTION_PORTAL_URL = 'lp_missing_portal_url';
+    const OPTION_SETTINGS = 'lp_missing_settings';
+    const OPTION_ATTENTION_FLAG = '_lp_missing_needs_attention';
+    const OPTION_HAS_MISSING_DATA = '_lp_missing_has_data';
+    const OPTION_HAS_OPEN_MISSING = '_lp_missing_has_open';
+    const CLEANUP_HOOK = 'lp_missing_cleanup_order';
+    const DAILY_CLEANUP_HOOK = 'lp_missing_daily_cleanup';
+    const DAILY_CLEANUP_LIMIT = 25;
+    const CLEANUP_MIN_DAYS = 7;
+    const AJAX_NONCE_ACTION = 'lp_missing_admin';
+    const SHORTCODE = 'lp_missing_items';
+
+    protected static $auto_email_sent = array();
+    protected static $settings = null;
+
+    protected static function get_cached_product( $product_id, &$cache ) {
+        $product_id = absint( $product_id );
+        if ( $product_id && ! isset( $cache[ $product_id ] ) ) {
+            $cache[ $product_id ] = wc_get_product( $product_id );
+        }
+        return isset( $cache[ $product_id ] ) ? $cache[ $product_id ] : null;
+    }
+
+    public static function init() {
+        add_action( 'add_meta_boxes', array( __CLASS__, 'add_metabox' ) );
+        add_action( 'save_post_shop_order', array( __CLASS__, 'save_metabox' ), 10, 2 );
+        add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_admin_scripts' ) );
+        add_action( 'wp_ajax_lp_missing_search_products', array( __CLASS__, 'ajax_search_products' ) );
+        add_action( 'wp_ajax_lp_missing_preview_product', array( __CLASS__, 'ajax_preview_product' ) );
+        add_action( 'admin_post_lp_missing_send_email', array( __CLASS__, 'handle_admin_send_email' ) );
+        add_action( 'admin_notices', array( __CLASS__, 'admin_notices' ) );
+        add_filter( 'woocommerce_email_classes', array( __CLASS__, 'register_email_class' ) );
+        add_shortcode( self::SHORTCODE, array( __CLASS__, 'render_shortcode' ) );
+        add_action( 'lp_missing_item_updated', array( __CLASS__, 'handle_item_updated' ), 10, 4 );
+        add_action( 'lp_missing_send_reminder', array( __CLASS__, 'handle_scheduled_reminder' ), 10, 2 );
+        add_action( 'admin_menu', array( __CLASS__, 'register_settings_page' ) );
+        add_action( 'admin_post_lp_missing_save_settings', array( __CLASS__, 'handle_settings_save' ) );
+        add_action( self::CLEANUP_HOOK, array( __CLASS__, 'handle_cleanup_order' ) );
+        add_action( 'admin_post_lp_missing_apply_decision', array( __CLASS__, 'handle_apply_decision' ) );
+        add_action( 'init', array( __CLASS__, 'maybe_schedule_daily_cleanup' ) );
+        add_action( self::DAILY_CLEANUP_HOOK, array( __CLASS__, 'run_daily_cleanup' ) );
+        add_filter( 'views_edit-shop_order', array( __CLASS__, 'add_missing_orders_view' ) );
+        add_filter( 'request', array( __CLASS__, 'filter_missing_orders_view' ) );
+        add_filter( 'manage_edit-shop_order_columns', array( __CLASS__, 'register_missing_column' ) );
+        add_action( 'manage_shop_order_posts_custom_column', array( __CLASS__, 'render_missing_column' ), 10, 2 );
+    }
+
+    public static function add_metabox() {
+        add_meta_box(
+            'lp_missing_metabox',
+            __( 'Missing / Problem Items', 'lp-missing' ),
+            array( __CLASS__, 'render_metabox' ),
+            'shop_order',
+            'normal',
+            'high'
+        );
+    }
+
+    protected static function default_item_data() {
+        return array(
+            'missing'         => false,
+            'propose_delete'  => false,
+            'qty_missing'     => 0,
+            'notes'           => '',
+            'internal_notes'  => '',
+            'alternatives'    => array(),
+            'status'          => 'pending',
+            'selected_alt_id' => 0,
+            'qty_alt'         => 0,
+            'stock_locked_qty'=> 0,
+            'last_updated'    => 0,
+            'first_missing_at'=> 0,
+            'reminder_count'  => 0,
+            'last_reminder_at'=> 0,
+            'reminder_scheduled_for' => 0,
+            'needs_attention' => false,
+            'resolved_at'     => 0,
+            'decision_made_at'=> 0,
+        );
+    }
+
+    protected static function get_item_data( $item ) {
+        $data = $item->get_meta( self::META_KEY, true );
+        if ( ! is_array( $data ) ) {
+            $data = array();
+        }
+
+        $data = wp_parse_args( $data, self::default_item_data() );
+        $data['missing'] = (bool) $data['missing'];
+        $data['propose_delete'] = (bool) $data['propose_delete'];
+        $data['qty_missing'] = absint( $data['qty_missing'] );
+        $data['alternatives'] = is_array( $data['alternatives'] ) ? array_values( array_unique( array_map( 'absint' , $data['alternatives'] ) ) ) : array();
+        $data['selected_alt_id'] = absint( $data['selected_alt_id'] );
+        $data['qty_alt'] = absint( $data['qty_alt'] );
+        $data['stock_locked_qty'] = absint( $data['stock_locked_qty'] );
+        $data['last_updated'] = absint( $data['last_updated'] );
+        $data['first_missing_at'] = absint( $data['first_missing_at'] );
+        $data['reminder_count'] = absint( $data['reminder_count'] );
+        $data['last_reminder_at'] = absint( $data['last_reminder_at'] );
+        $data['reminder_scheduled_for'] = absint( $data['reminder_scheduled_for'] );
+        $data['needs_attention'] = (bool) $data['needs_attention'];
+        $data['resolved_at'] = absint( isset( $data['resolved_at'] ) ? $data['resolved_at'] : 0 );
+        $data['decision_made_at'] = absint( isset( $data['decision_made_at'] ) ? $data['decision_made_at'] : 0 );
+
+        if ( 'alt_accepted' === $data['status'] ) {
+            $data['status'] = 'alt_pending';
+        } elseif ( 'delete_accepted' === $data['status'] ) {
+            $data['status'] = 'delete_pending';
+        }
+
+        return $data;
+    }
+
+    protected static function get_default_settings() {
+        return array(
+            'enable_stock_lock'           => 'yes',
+            'enable_stock_notes'          => 'yes',
+            'reminder_delay_days'         => 3,
+            'reminder_max_count'          => 3,
+            'reminder_max_age_days'       => 7,
+            'cleanup_resolved_after_days' => 30,
+            'show_stock_preview'          => 'yes',
+            'portal_base_url'             => '',
+            'alt_price_handling'          => 'charge_customer',
+        );
+    }
+
+    protected static function sanitize_settings( $settings ) {
+        $defaults = self::get_default_settings();
+        $settings = is_array( $settings ) ? wp_parse_args( $settings, $defaults ) : $defaults;
+
+        $settings['enable_stock_lock']  = 'yes' === $settings['enable_stock_lock'] ? 'yes' : 'no';
+        $settings['enable_stock_notes'] = 'yes' === $settings['enable_stock_notes'] ? 'yes' : 'no';
+        $settings['show_stock_preview'] = 'yes' === $settings['show_stock_preview'] ? 'yes' : 'no';
+
+        $settings['reminder_delay_days']   = max( 1, absint( $settings['reminder_delay_days'] ) );
+        $settings['reminder_max_count']    = max( 1, absint( $settings['reminder_max_count'] ) );
+        $settings['reminder_max_age_days'] = max( 1, absint( $settings['reminder_max_age_days'] ) );
+
+        $settings['cleanup_resolved_after_days'] = max( self::CLEANUP_MIN_DAYS, absint( $settings['cleanup_resolved_after_days'] ) );
+
+        $settings['portal_base_url'] = esc_url_raw( trim( $settings['portal_base_url'] ) );
+
+        $allowed_price_handling = array( 'charge_customer', 'store_covers' );
+        $settings['alt_price_handling'] = in_array( $settings['alt_price_handling'], $allowed_price_handling, true ) ? $settings['alt_price_handling'] : 'charge_customer';
+
+        return $settings;
+    }
+
+    protected static function get_settings( $force = false ) {
+        if ( is_array( self::$settings ) && ! $force ) {
+            return self::$settings;
+        }
+
+        $raw = get_option( self::OPTION_SETTINGS, array() );
+
+        if ( empty( $raw['enable_stock_lock'] ) ) {
+            $raw['enable_stock_lock'] = get_option( self::OPTION_ENABLE_STOCK, 'yes' );
+        }
+        if ( empty( $raw['portal_base_url'] ) ) {
+            $raw['portal_base_url'] = get_option( self::OPTION_PORTAL_URL, '' );
+        }
+
+        self::$settings = self::sanitize_settings( $raw );
+
+        return self::$settings;
+    }
+
+    protected static function update_settings( $settings ) {
+        $sanitized = self::sanitize_settings( $settings );
+        update_option( self::OPTION_SETTINGS, $sanitized, false );
+        update_option( self::OPTION_ENABLE_STOCK, $sanitized['enable_stock_lock'], false );
+        update_option( self::OPTION_PORTAL_URL, $sanitized['portal_base_url'], false );
+        self::$settings = $sanitized;
+    }
+
+    public static function render_metabox( $post ) {
+        $order = wc_get_order( $post->ID );
+        if ( ! $order ) {
+            return;
+        }
+
+        wp_nonce_field( 'lp_missing_metabox', 'lp_missing_nonce' );
+        $items = $order->get_items( 'line_item' );
+        $product_cache = array();
+        $alt_ids = array();
+        foreach ( $items as $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! empty( $data['alternatives'] ) ) {
+                $alt_ids = array_merge( $alt_ids, $data['alternatives'] );
+            }
+            if ( ! empty( $data['selected_alt_id'] ) ) {
+                $alt_ids[] = absint( $data['selected_alt_id'] );
+            }
+        }
+        if ( $alt_ids ) {
+            $products = wc_get_products( array( 'include' => array_values( array_unique( $alt_ids ) ), 'limit' => -1 ) );
+            foreach ( $products as $product_obj ) {
+                $product_cache[ $product_obj->get_id() ] = $product_obj;
+            }
+        }
+
+        echo '<div class="lp-missing-metabox">';
+        foreach ( $items as $item_id => $item ) {
+            $data = self::get_item_data( $item );
+            $product = $item->get_product();
+            $product_name = $product ? $product->get_name() : $item->get_name();
+            $alt_list = ! empty( $data['alternatives'] ) ? implode( ',', $data['alternatives'] ) : '';
+            echo '<div class="lp-missing-item" style="border-bottom:1px solid #ddd;padding:10px 0;">';
+            echo '<strong>' . esc_html( $product_name ) . '</strong> (' . sprintf( __( 'Qty: %s', 'lp-missing' ), esc_html( $item->get_quantity() ) ) . ')';
+            echo '<div style="margin-top:8px;">';
+            echo '<label><input type="checkbox" name="lp_missing_items[' . absint( $item_id ) . '][missing]" value="1" ' . checked( true, $data['missing'], false ) . ' /> ' . esc_html__( 'Mark as missing', 'lp-missing' ) . '</label> ';
+            echo '<label style="margin-left:12px;"><input type="checkbox" name="lp_missing_items[' . absint( $item_id ) . '][propose_delete]" value="1" ' . checked( true, $data['propose_delete'], false ) . ' /> ' . esc_html__( 'Propose deleting this item instead', 'lp-missing' ) . '</label>';
+            echo '</div>';
+
+            echo '<div style="margin-top:8px;">';
+            echo '<label>' . esc_html__( 'Quantity missing', 'lp-missing' ) . ': <input type="number" min="0" name="lp_missing_items[' . absint( $item_id ) . '][qty_missing]" value="' . esc_attr( $data['qty_missing'] ) . '" style="width:80px;" /></label>';
+            echo '</div>';
+
+            echo '<div style="margin-top:8px;">';
+            echo '<label>' . esc_html__( 'Notes (customer visible)', 'lp-missing' ) . '<br /><textarea name="lp_missing_items[' . absint( $item_id ) . '][notes]" rows="2" style="width:100%;">' . esc_textarea( $data['notes'] ) . '</textarea></label>';
+            echo '</div>';
+
+            echo '<div style="margin-top:8px;">';
+            echo '<label>' . esc_html__( 'Internal notes (staff only)', 'lp-missing' ) . '<br /><textarea name="lp_missing_items[' . absint( $item_id ) . '][internal_notes]" rows="2" style="width:100%;">' . esc_textarea( $data['internal_notes'] ) . '</textarea></label>';
+            echo '</div>';
+
+            echo '<div style="margin-top:8px;" class="lp-missing-alternatives" data-item-id="' . absint( $item_id ) . '">';
+            echo '<label>' . esc_html__( 'Suggested alternatives (IDs, up to 3)', 'lp-missing' ) . '</label><br />';
+            echo '<input type="hidden" class="lp-alt-ids" name="lp_missing_items[' . absint( $item_id ) . '][alternatives]" value="' . esc_attr( $alt_list ) . '" />';
+            echo '<input type="text" class="lp-alt-search" placeholder="' . esc_attr__( 'Search by SKU or title', 'lp-missing' ) . '" />';
+            echo '<ul class="lp-alt-list" style="margin:8px 0 0; padding-left:18px;">';
+            if ( ! empty( $data['alternatives'] ) ) {
+                foreach ( $data['alternatives'] as $alt_id ) {
+                    $alt_product = self::get_cached_product( $alt_id, $product_cache );
+                    if ( ! $alt_product ) {
+                        continue;
+                    }
+                    echo '<li data-product-id="' . absint( $alt_id ) . '" style="margin-bottom:6px;">';
+                    echo esc_html( $alt_product->get_name() ) . ' (ID: ' . absint( $alt_id ) . ')';
+                    echo '<span class="lp-alt-preview" style="margin-left:6px; font-size:11px; color:#555;"></span> ';
+                    echo '<a href="#" class="lp-alt-remove" aria-label="' . esc_attr__( 'Remove', 'lp-missing' ) . '">[' . esc_html__( 'Remove', 'lp-missing' ) . ']</a>';
+                    echo '</li>';
+                }
+            }
+            echo '</ul>';
+            echo '</div>';
+            self::render_admin_line_status( $order, $item_id, $item, $data, $product_cache );
+            echo '</div>';
+        }
+        if ( self::order_has_missing_items( $order ) ) {
+            $send_url = wp_nonce_url( admin_url( 'admin-post.php?action=lp_missing_send_email&order_id=' . $order->get_id() ), 'lp_missing_send_email_' . $order->get_id() );
+            echo '<div class="lp-missing-admin-actions" style="margin-top:12px;">';
+            echo '<a class="button" href="' . esc_url( $send_url ) . '">' . esc_html__( 'Send customer portal email', 'lp-missing' ) . '</a>';
+            echo '</div>';
+        }
+        echo '</div>';
+    }
+
+    protected static function render_admin_line_status( $order, $item_id, $item, $data, &$product_cache ) {
+        echo '<div class="lp-missing-status" style="margin-top:8px;padding:10px;background:#f8f8f8;border:1px solid #e2e2e2;">';
+        if ( empty( $data['missing'] ) ) {
+            echo '<strong>' . esc_html__( 'Status:', 'lp-missing' ) . '</strong> ' . esc_html__( 'Not marked as missing.', 'lp-missing' );
+            echo '</div>';
+            return;
+        }
+
+        $status_label = __( 'Awaiting customer choice.', 'lp-missing' );
+        $decision_text = '';
+        $selected_alt = ! empty( $data['selected_alt_id'] ) ? self::get_cached_product( $data['selected_alt_id'], $product_cache ) : null;
+
+        if ( self::is_line_resolved( $data ) ) {
+            if ( 'alt_applied' === $data['status'] ) {
+                $status_label = __( 'Applied: alternative added.', 'lp-missing' );
+            } elseif ( 'delete_applied' === $data['status'] ) {
+                $status_label = __( 'Applied: line removed/refunded.', 'lp-missing' );
+            } else {
+                $status_label = __( 'Applied.', 'lp-missing' );
+            }
+        } elseif ( 'alt_pending' === $data['status'] && $selected_alt ) {
+            $status_label = __( 'Customer chose an alternative (pending staff).', 'lp-missing' );
+            $decision_text = sprintf(
+                /* translators: 1: product name, 2: quantity */
+                __( 'Alternative: %1$s (Qty %2$d)', 'lp-missing' ),
+                $selected_alt->get_name(),
+                $data['qty_alt'] ? absint( $data['qty_alt'] ) : absint( $data['qty_missing'] )
+            );
+        } elseif ( 'delete_pending' === $data['status'] ) {
+            $status_label = __( 'Customer approved deletion (pending staff).', 'lp-missing' );
+            $decision_text = sprintf( __( 'Agreed to delete %s.', 'lp-missing' ), $item->get_name() );
+        } elseif ( 'declined' === $data['status'] ) {
+            $status_label = __( 'Customer declined the listed alternatives.', 'lp-missing' );
+        } elseif ( $data['needs_attention'] ) {
+            $status_label = __( 'Needs manual attention.', 'lp-missing' );
+        }
+
+        echo '<strong>' . esc_html__( 'Status:', 'lp-missing' ) . '</strong> ' . esc_html( $status_label );
+        if ( $decision_text ) {
+            echo '<br /><span>' . esc_html( $decision_text ) . '</span>';
+        }
+
+        if ( 'alt_pending' === $data['status'] && $selected_alt ) {
+            echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" style="margin-top:8px;">';
+            wp_nonce_field( 'lp_missing_apply_' . $order->get_id(), 'lp_missing_apply_nonce' );
+            echo '<input type="hidden" name="action" value="lp_missing_apply_decision" />';
+            echo '<input type="hidden" name="order_id" value="' . absint( $order->get_id() ) . '" />';
+            echo '<input type="hidden" name="item_id" value="' . absint( $item_id ) . '" />';
+            echo '<input type="hidden" name="apply_type" value="alternative" />';
+            echo '<p style="margin:6px 0 4px 0;">' . esc_html__( 'Apply this alternative to the order:', 'lp-missing' ) . '</p>';
+            echo '<label><input type="radio" name="apply_mode" value="replace" checked /> ' . esc_html__( 'Replace missing quantity on this line', 'lp-missing' ) . '</label><br />';
+            echo '<label><input type="radio" name="apply_mode" value="add" /> ' . esc_html__( 'Add as an extra line item', 'lp-missing' ) . '</label><br />';
+            echo '<button type="submit" class="button button-primary" style="margin-top:6px;">' . esc_html__( 'Apply choice', 'lp-missing' ) . '</button>';
+            echo '</form>';
+        } elseif ( 'delete_pending' === $data['status'] ) {
+            echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" style="margin-top:8px;">';
+            wp_nonce_field( 'lp_missing_apply_' . $order->get_id(), 'lp_missing_apply_nonce' );
+            echo '<input type="hidden" name="action" value="lp_missing_apply_decision" />';
+            echo '<input type="hidden" name="order_id" value="' . absint( $order->get_id() ) . '" />';
+            echo '<input type="hidden" name="item_id" value="' . absint( $item_id ) . '" />';
+            echo '<input type="hidden" name="apply_type" value="delete" />';
+            echo '<p style="margin:6px 0 4px 0;">' . esc_html__( 'Customer approved deletion of this line.', 'lp-missing' ) . '</p>';
+            echo '<label><input type="radio" name="delete_mode" value="reduce" checked /> ' . esc_html__( 'Remove the missing quantity from the order totals', 'lp-missing' ) . '</label><br />';
+            echo '<label><input type="radio" name="delete_mode" value="refund" /> ' . esc_html__( 'Issue a refund for the missing quantity', 'lp-missing' ) . '</label><br />';
+            echo '<button type="submit" class="button button-primary" style="margin-top:6px;">' . esc_html__( 'Apply deletion', 'lp-missing' ) . '</button>';
+            echo '</form>';
+        }
+
+        echo '</div>';
+    }
+
+    public static function enqueue_admin_scripts( $hook ) {
+        if ( 'post.php' !== $hook && 'post-new.php' !== $hook ) {
+            return;
+        }
+        $screen = get_current_screen();
+        if ( empty( $screen->post_type ) || 'shop_order' !== $screen->post_type ) {
+            return;
+        }
+
+        wp_register_script( 'lp-missing-admin', '', array( 'jquery' ), '1.0', true );
+        $inline = <<<'JS'
+(function($){
+    function updateInput($container){
+        var ids=[];
+        $container.find('.lp-alt-list li').each(function(){
+            var id=$(this).data('product-id');
+            if(id){ids.push(id);}
+        });
+        $container.find('.lp-alt-ids').val(ids.join(','));
+    }
+    function renderPreview($el,id){
+        if(!id){return;}
+        $.get(ajaxurl,{action:'lp_missing_preview_product',nonce:lpMissingAdmin.nonce,product_id:id},function(resp){
+            if(resp && resp.success && resp.data){
+                var d=resp.data;
+                var text=(d.thumbnail?"<img src='"+d.thumbnail+"' style=\"width:20px;height:20px;object-fit:cover;margin-right:4px;vertical-align:middle;\" />":"");
+                var stockText='';
+                if(lpMissingAdmin.showStock && null!==d.in_stock){
+                    stockText = (d.in_stock?'In stock':'Out of stock');
+                    if(null!==d.stock_quantity){stockText+=' ('+d.stock_quantity+')';}
+                    stockText = ' | '+stockText;
+                }
+                text+='<span>'+d.title+' | '+(d.sku?'SKU: '+d.sku+' | ':'')+stockText+'</span>';
+                $el.html(text);
+            }
+        });
+    }
+    $(document).on('keypress','.lp-alt-search',function(e){
+        if(13===e.which){e.preventDefault();}
+    });
+    $(document).on('input','.lp-alt-search',function(){
+        var $input=$(this);var term=$.trim($input.val());
+        var $container=$input.closest('.lp-missing-alternatives');
+        if(term.length<2){return;}
+        $.get(ajaxurl,{action:'lp_missing_search_products',nonce:lpMissingAdmin.nonce,term:term},function(resp){
+            if(resp && resp.success && resp.data && resp.data.length){
+                var existing=$container.find('.lp-alt-list li').length;
+                if(existing>=3){return;}
+                var item=resp.data[0];
+                var exists=false;
+                $container.find('.lp-alt-list li').each(function(){if($(this).data('product-id')==item.id){exists=true;}});
+                if(exists){return;}
+                var $li=$('<li data-product-id="'+item.id+'"></li>');
+                $li.append(document.createTextNode(item.title+' (ID: '+item.id+')'));
+                $li.append(" <span class='lp-alt-preview' style='margin-left:6px;font-size:11px;color:#555;'></span> ");
+                $li.append("<a href='#' class='lp-alt-remove'>["+lpMissingAdmin.removeLabel+"]</a>");
+                $container.find('.lp-alt-list').append($li);
+                renderPreview($li.find('.lp-alt-preview'),item.id);
+                updateInput($container);
+            }
+        });
+    });
+    $(document).on('click','.lp-alt-remove',function(e){e.preventDefault();var $container=$(this).closest('.lp-missing-alternatives');$(this).closest('li').remove();updateInput($container);});
+    $('.lp-alt-list li').each(function(){var $li=$(this);renderPreview($li.find('.lp-alt-preview'),$li.data('product-id'));});
+})(jQuery);
+JS;
+        wp_add_inline_script( 'lp-missing-admin', $inline );
+
+
+        wp_localize_script( 'lp-missing-admin', 'lpMissingAdmin', array(
+            'nonce'        => wp_create_nonce( self::AJAX_NONCE_ACTION ),
+            'removeLabel'  => esc_html__( 'Remove', 'lp-missing' ),
+            'showStock'    => 'yes' === self::get_settings()['show_stock_preview'],
+        ) );
+        wp_enqueue_script( 'lp-missing-admin' );
+    }
+
+    protected static function sanitize_alt_ids( $input ) {
+        if ( ! is_string( $input ) ) {
+            return array();
+        }
+        $parts = preg_split( '/[,\s]+/', $input );
+        $ids = array();
+        foreach ( $parts as $part ) {
+            $id = absint( $part );
+            if ( $id > 0 ) {
+                $ids[] = $id;
+            }
+        }
+        $ids = array_slice( array_values( array_unique( $ids ) ), 0, 3 );
+        return $ids;
+    }
+
+    protected static function stock_lock_enabled() {
+        $settings = self::get_settings();
+        $enabled  = isset( $settings['enable_stock_lock'] ) ? $settings['enable_stock_lock'] : 'yes';
+        return apply_filters( 'lp_missing_enable_stock_log', 'yes' === $enabled );
+    }
+
+    protected static function get_secret() {
+        $secret = (string) get_option( self::OPTION_SECRET, '' );
+        if ( empty( $secret ) ) {
+            $secret = wp_generate_password( 64, true, true );
+            add_option( self::OPTION_SECRET, $secret, '', false );
+        }
+        return $secret;
+    }
+
+    protected static function generate_signature( $order_id, $email ) {
+        if ( ! $order_id || ! $email ) {
+            return '';
+        }
+        $data = $order_id . '|' . strtolower( (string) $email );
+        return hash_hmac( 'sha256', $data, self::get_secret() );
+    }
+
+    protected static function validate_signature( $order_id, $email, $key ) {
+        if ( ! $order_id || ! $email || ! $key ) {
+            return false;
+        }
+        $expected = self::generate_signature( $order_id, $email );
+        return hash_equals( $expected, (string) $key );
+    }
+
+    protected static function get_portal_base_url() {
+        $settings = self::get_settings();
+        $configured = trim( (string) ( isset( $settings['portal_base_url'] ) ? $settings['portal_base_url'] : '' ) );
+        $base_url  = $configured ? $configured : wc_get_page_permalink( 'myaccount' );
+        if ( ! $base_url ) {
+            $base_url = home_url( '/' );
+        }
+        return apply_filters( 'lp_missing_portal_base_url', $base_url );
+    }
+
+    public static function get_magic_link_for_order( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+        $args = array(
+            'oid' => $order->get_id(),
+            'key' => self::generate_signature( $order->get_id(), $order->get_billing_email() ),
+        );
+        return add_query_arg( $args, self::get_portal_base_url() );
+    }
+
+    public static function order_has_missing_items( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return false;
+        }
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! empty( $data['missing'] ) && ! self::is_line_resolved( $data ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected static function order_has_open_missing_items( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return false;
+        }
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! empty( $data['missing'] ) && ! self::is_line_resolved( $data ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected static function refresh_order_flags( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+
+        $has_data       = false;
+        $has_open       = false;
+        $needs_attention = false;
+
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            $data        = self::get_item_data( $item );
+            $meta_exists = metadata_exists( 'order_item', $item->get_id(), self::META_KEY );
+
+            if ( $meta_exists || ! empty( $data['missing'] ) ) {
+                $has_data = true;
+            }
+
+            if ( ! empty( $data['needs_attention'] ) ) {
+                $needs_attention = true;
+            }
+
+            if ( ! empty( $data['missing'] ) && ! self::is_line_resolved( $data ) ) {
+                $has_open = true;
+            }
+        }
+
+        $updated = false;
+
+        if ( $needs_attention ) {
+            $order->update_meta_data( self::OPTION_ATTENTION_FLAG, 'yes' );
+        } else {
+            $order->delete_meta_data( self::OPTION_ATTENTION_FLAG );
+        }
+
+        if ( $has_data ) {
+            $order->update_meta_data( self::OPTION_HAS_MISSING_DATA, 'yes' );
+        } else {
+            $order->delete_meta_data( self::OPTION_HAS_MISSING_DATA );
+        }
+
+        if ( $has_open ) {
+            $order->update_meta_data( self::OPTION_HAS_OPEN_MISSING, 'yes' );
+        } else {
+            $order->delete_meta_data( self::OPTION_HAS_OPEN_MISSING );
+        }
+
+        $updated = true;
+
+        if ( $updated ) {
+            $order->save();
+        }
+    }
+
+    protected static function send_customer_email( $order ) {
+        if ( ! $order instanceof WC_Order || ! self::order_has_missing_items( $order ) ) {
+            return false;
+        }
+        $mailer = WC()->mailer();
+        if ( ! $mailer ) {
+            return false;
+        }
+        $emails = $mailer->get_emails();
+        if ( empty( $emails['lp_missing_customer_email'] ) ) {
+            return false;
+        }
+        $emails['lp_missing_customer_email']->trigger( $order->get_id() );
+        return true;
+    }
+
+    protected static function send_reminder_email( $order, $item_id ) {
+        if ( ! $order instanceof WC_Order || ! self::order_has_missing_items( $order ) ) {
+            return false;
+        }
+        $mailer = WC()->mailer();
+        if ( ! $mailer ) {
+            return false;
+        }
+        $emails = $mailer->get_emails();
+        if ( empty( $emails['lp_missing_customer_reminder'] ) ) {
+            return false;
+        }
+        $emails['lp_missing_customer_reminder']->trigger( $order->get_id(), $item_id );
+        return true;
+    }
+
+    public static function handle_admin_send_email() {
+        $order_id = isset( $_GET['order_id'] ) ? absint( $_GET['order_id'] ) : 0;
+        if ( ! $order_id ) {
+            wp_die( esc_html__( 'Invalid order.', 'lp-missing' ) );
+        }
+        if ( ! current_user_can( 'edit_shop_order', $order_id ) ) {
+            wp_die( esc_html__( 'You do not have permission to send this email.', 'lp-missing' ) );
+        }
+        $nonce = isset( $_GET['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ) : '';
+        if ( ! wp_verify_nonce( $nonce, 'lp_missing_send_email_' . $order_id ) ) {
+            wp_die( esc_html__( 'Security check failed.', 'lp-missing' ) );
+        }
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            wp_die( esc_html__( 'Order not found.', 'lp-missing' ) );
+        }
+
+        $result = 'missing';
+        if ( self::order_has_missing_items( $order ) ) {
+            $result = self::send_customer_email( $order ) ? 'sent' : 'failed';
+        }
+
+        wp_safe_redirect( add_query_arg( array( 'lp_missing_email_sent' => $result ), get_edit_post_link( $order_id, 'url' ) ) );
+        exit;
+    }
+
+    public static function handle_apply_decision() {
+        if ( ! current_user_can( 'edit_shop_orders' ) ) {
+            wp_die( esc_html__( 'You do not have permission to apply decisions.', 'lp-missing' ) );
+        }
+
+        $order_id = isset( $_POST['order_id'] ) ? absint( $_POST['order_id'] ) : 0;
+        $item_id  = isset( $_POST['item_id'] ) ? absint( $_POST['item_id'] ) : 0;
+        $nonce    = isset( $_POST['lp_missing_apply_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['lp_missing_apply_nonce'] ) ) : '';
+
+        if ( ! $order_id || ! $item_id || ! wp_verify_nonce( $nonce, 'lp_missing_apply_' . $order_id ) ) {
+            wp_die( esc_html__( 'Security check failed.', 'lp-missing' ) );
+        }
+
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            wp_die( esc_html__( 'Order not found.', 'lp-missing' ) );
+        }
+
+        $item = $order->get_item( $item_id );
+        if ( ! $item ) {
+            wp_die( esc_html__( 'Item not found.', 'lp-missing' ) );
+        }
+
+        $data       = self::get_item_data( $item );
+        $apply_type = isset( $_POST['apply_type'] ) ? sanitize_text_field( wp_unslash( $_POST['apply_type'] ) ) : '';
+        $result     = array( 'status' => 'error', 'message' => __( 'Unknown action.', 'lp-missing' ) );
+
+        if ( 'alternative' === $apply_type ) {
+            $mode   = isset( $_POST['apply_mode'] ) && 'add' === $_POST['apply_mode'] ? 'add' : 'replace';
+            $result = self::apply_alternative_decision( $order, $item, $item_id, $data, $mode );
+        } elseif ( 'delete' === $apply_type ) {
+            $mode   = isset( $_POST['delete_mode'] ) && 'refund' === $_POST['delete_mode'] ? 'refund' : 'reduce';
+            $result = self::apply_delete_decision( $order, $item, $item_id, $data, $mode );
+        }
+
+        $redirect = add_query_arg( 'lp_missing_apply', $result['status'], get_edit_post_link( $order_id, 'url' ) );
+        if ( ! empty( $result['message'] ) ) {
+            $redirect = add_query_arg( 'lp_missing_message', rawurlencode( $result['message'] ), $redirect );
+        }
+        wp_safe_redirect( $redirect );
+        exit;
+    }
+
+    protected static function apply_alternative_decision( $order, $item, $item_id, $data, $mode ) {
+        if ( 'alt_pending' !== $data['status'] || empty( $data['selected_alt_id'] ) ) {
+            return array( 'status' => 'error', 'message' => __( 'No customer-approved alternative to apply.', 'lp-missing' ) );
+        }
+
+        $alt_product = wc_get_product( $data['selected_alt_id'] );
+        if ( ! $alt_product ) {
+            return array( 'status' => 'error', 'message' => __( 'Selected alternative is no longer available.', 'lp-missing' ) );
+        }
+
+        $qty_alt = $data['qty_alt'] ? absint( $data['qty_alt'] ) : absint( $data['qty_missing'] );
+        $qty_alt = max( 1, min( $qty_alt, $item->get_quantity() ) );
+
+        $original_unit = self::get_item_unit_price_incl_tax( $item );
+        if ( 'replace' === $mode ) {
+            $new_qty = max( 0, $item->get_quantity() - $qty_alt );
+            $item->set_quantity( $new_qty );
+            $item->save();
+        }
+
+        $order->add_product( $alt_product, $qty_alt );
+
+        $alt_unit      = self::get_product_unit_price_incl_tax( $alt_product );
+        $difference    = ( $alt_unit - $original_unit ) * $qty_alt;
+        $difference    = wc_format_decimal( $difference, wc_get_price_decimals() );
+
+        if ( $difference > 0 ) {
+            self::handle_price_difference_surcharge( $order, $difference, $alt_product, $qty_alt );
+        } elseif ( $difference < 0 ) {
+            $order->add_order_note( sprintf( __( 'Alternative %1$s was cheaper by %2$s for %3$d unit(s).', 'lp-missing' ), $alt_product->get_name(), wc_price( abs( $difference ), array( 'currency' => $order->get_currency() ) ), $qty_alt ) );
+        }
+
+        $new_data = $data;
+        $new_data['status'] = 'alt_applied';
+        $new_data['missing'] = false;
+        $new_data['qty_missing'] = 0;
+        $new_data['needs_attention'] = false;
+        $new_data['reminder_scheduled_for'] = 0;
+        $new_data['resolved_at'] = time();
+        $new_data['last_updated'] = time();
+        $new_data['stock_locked_qty'] = isset( $new_data['stock_locked_qty'] ) ? absint( $new_data['stock_locked_qty'] ) : 0;
+
+        self::maybe_adjust_stock( $item, $data, $new_data, $order );
+        $item->update_meta_data( self::META_KEY, $new_data );
+        $item->save();
+        $order->calculate_totals( true );
+
+        $note_parts   = array();
+        $note_parts[] = sprintf( __( 'Applied customer-selected alternative %1$s (Qty %2$d).', 'lp-missing' ), $alt_product->get_name(), $qty_alt );
+        $note_parts[] = sprintf( __( 'Mode: %s.', 'lp-missing' ), 'replace' === $mode ? __( 'Replace', 'lp-missing' ) : __( 'Add new line', 'lp-missing' ) );
+        if ( 0 != $difference ) {
+            $note_parts[] = sprintf( __( 'Price difference: %s.', 'lp-missing' ), wc_price( $difference, array( 'currency' => $order->get_currency() ) ) );
+        }
+        $order->add_order_note( implode( ' ', $note_parts ) );
+
+        do_action( 'lp_missing_item_updated', $order, $item_id, $new_data, $data );
+
+        return array( 'status' => 'success', 'message' => __( 'Alternative applied to the order.', 'lp-missing' ) );
+    }
+
+    protected static function apply_delete_decision( $order, $item, $item_id, $data, $mode ) {
+        if ( 'delete_pending' !== $data['status'] ) {
+            return array( 'status' => 'error', 'message' => __( 'No customer-approved deletion to apply.', 'lp-missing' ) );
+        }
+
+        $qty_remove = $data['qty_missing'] ? absint( $data['qty_missing'] ) : $item->get_quantity();
+        $qty_remove = max( 1, min( $qty_remove, $item->get_quantity() ) );
+
+        $unit_price    = self::get_item_unit_price_incl_tax( $item );
+
+        $new_qty = max( 0, $item->get_quantity() - $qty_remove );
+        $item->set_quantity( $new_qty );
+        $item->save();
+        $order->calculate_totals( true );
+
+        if ( 'refund' === $mode ) {
+            $refund_amount = wc_format_decimal( $unit_price * $qty_remove, wc_get_price_decimals() );
+            if ( $refund_amount > 0 ) {
+                $refund = wc_create_refund( array(
+                    'amount'         => $refund_amount,
+                    'reason'         => __( 'Customer approved deletion of missing items.', 'lp-missing' ),
+                    'order_id'       => $order->get_id(),
+                    'refund_payment' => false,
+                ) );
+                if ( is_wp_error( $refund ) ) {
+                    $order->add_order_note( sprintf( __( 'Refund could not be created for missing-item deletion: %s', 'lp-missing' ), $refund->get_error_message() ) );
+                }
+            }
+        }
+
+        $new_data = $data;
+        $new_data['status'] = 'delete_applied';
+        $new_data['missing'] = false;
+        $new_data['qty_missing'] = 0;
+        $new_data['needs_attention'] = false;
+        $new_data['reminder_scheduled_for'] = 0;
+        $new_data['resolved_at'] = time();
+        $new_data['last_updated'] = time();
+        $new_data['stock_locked_qty'] = isset( $new_data['stock_locked_qty'] ) ? absint( $new_data['stock_locked_qty'] ) : 0;
+
+        self::maybe_adjust_stock( $item, $data, $new_data, $order );
+        $item->update_meta_data( self::META_KEY, $new_data );
+        $item->save();
+
+        $note = sprintf( __( 'Applied customer-approved deletion for %1$s (Qty %2$d). Mode: %3$s.', 'lp-missing' ), $item->get_name(), $qty_remove, 'refund' === $mode ? __( 'Refund', 'lp-missing' ) : __( 'Remove from totals', 'lp-missing' ) );
+        $order->add_order_note( $note );
+
+        do_action( 'lp_missing_item_updated', $order, $item_id, $new_data, $data );
+
+        return array( 'status' => 'success', 'message' => __( 'Deletion applied to the order.', 'lp-missing' ) );
+    }
+
+    protected static function get_item_unit_price_incl_tax( $item ) {
+        $qty   = max( 1, $item->get_quantity() );
+        $total = floatval( $item->get_total() ) + floatval( $item->get_total_tax() );
+        return $total / $qty;
+    }
+
+    protected static function get_product_unit_price_incl_tax( $product ) {
+        return (float) wc_get_price_including_tax( $product, array( 'qty' => 1 ) );
+    }
+
+    protected static function handle_price_difference_surcharge( $order, $difference, $alt_product, $qty_alt ) {
+        $settings = self::get_settings();
+        if ( 'store_covers' === $settings['alt_price_handling'] ) {
+            $order->add_order_note( sprintf( __( 'Store covered %1$s extra for alternative %2$s (Qty %3$d).', 'lp-missing' ), wc_price( $difference, array( 'currency' => $order->get_currency() ) ), $alt_product->get_name(), $qty_alt ) );
+            return;
+        }
+
+        $surcharge_order = wc_create_order( array( 'customer_id' => $order->get_customer_id() ) );
+        if ( is_wp_error( $surcharge_order ) ) {
+            $order->add_order_note( sprintf( __( 'Could not create surcharge order for alternative: %s', 'lp-missing' ), $surcharge_order->get_error_message() ) );
+            return;
+        }
+        $surcharge_order->set_parent_id( $order->get_id() );
+        $surcharge_order->set_currency( $order->get_currency() );
+        $surcharge_order->set_address( $order->get_address( 'billing' ), 'billing' );
+        $surcharge_order->set_address( $order->get_address( 'shipping' ), 'shipping' );
+
+        $fee = new WC_Order_Item_Fee();
+        $fee->set_name( sprintf( __( 'Price difference for alternative on order #%s', 'lp-missing' ), $order->get_order_number() ) );
+        $fee->set_amount( $difference );
+        $fee->set_total( $difference );
+        $surcharge_order->add_item( $fee );
+        $surcharge_order->calculate_totals( true );
+        $surcharge_order->set_status( 'pending' );
+        $surcharge_order->add_order_note( sprintf( __( 'Surcharge created for alternative %1$s (Qty %2$d) chosen on order #%3$s.', 'lp-missing' ), $alt_product->get_name(), $qty_alt, $order->get_order_number() ) );
+        $surcharge_order->save();
+
+        $order->add_order_note( sprintf( __( 'Created surcharge order #%1$s for alternative %2$s (Qty %3$d). Amount: %4$s.', 'lp-missing' ), $surcharge_order->get_order_number(), $alt_product->get_name(), $qty_alt, wc_price( $difference, array( 'currency' => $order->get_currency() ) ) ) );
+
+        $mailer = WC()->mailer();
+        if ( $mailer && isset( $mailer->emails['WC_Email_Customer_Invoice'] ) ) {
+            $mailer->emails['WC_Email_Customer_Invoice']->trigger( $surcharge_order->get_id(), $surcharge_order );
+        }
+    }
+
+    public static function admin_notices() {
+        if ( ! function_exists( 'get_current_screen' ) ) {
+            return;
+        }
+        $screen = get_current_screen();
+        if ( empty( $screen->id ) || 'shop_order' !== $screen->id ) {
+            return;
+        }
+        $email_status = isset( $_GET['lp_missing_email_sent'] ) ? sanitize_text_field( wp_unslash( $_GET['lp_missing_email_sent'] ) ) : '';
+        $apply_status = isset( $_GET['lp_missing_apply'] ) ? sanitize_text_field( wp_unslash( $_GET['lp_missing_apply'] ) ) : '';
+        $messages     = array();
+
+        if ( $email_status ) {
+            if ( 'sent' === $email_status ) {
+                $messages[] = __( 'Missing items email sent to the customer.', 'lp-missing' );
+            } elseif ( 'missing' === $email_status ) {
+                $messages[] = __( 'No missing items were found for this order.', 'lp-missing' );
+            } elseif ( 'failed' === $email_status ) {
+                $messages[] = __( 'The email could not be sent. Please check email settings.', 'lp-missing' );
+            }
+        }
+
+        if ( $apply_status ) {
+            $human = 'success' === $apply_status ? __( 'Customer decision applied.', 'lp-missing' ) : __( 'Could not apply the customer decision.', 'lp-missing' );
+            if ( ! empty( $_GET['lp_missing_message'] ) ) {
+                $human .= ' ' . sanitize_text_field( wp_unslash( $_GET['lp_missing_message'] ) );
+            }
+            $messages[] = $human;
+        }
+
+        foreach ( $messages as $message ) {
+            echo '<div class="notice notice-success is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
+        }
+    }
+
+    public static function register_settings_page() {
+        add_submenu_page(
+            'woocommerce',
+            __( 'Missing Items Settings', 'lp-missing' ),
+            __( 'Missing Items Settings', 'lp-missing' ),
+            'manage_woocommerce',
+            'lp-missing-settings',
+            array( __CLASS__, 'render_settings_page' )
+        );
+    }
+
+    public static function handle_settings_save() {
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_die( esc_html__( 'You do not have permission to manage these settings.', 'lp-missing' ) );
+        }
+        check_admin_referer( 'lp_missing_settings' );
+
+        $settings = array(
+            'enable_stock_lock'           => ! empty( $_POST['lp_enable_stock_lock'] ) ? 'yes' : 'no',
+            'enable_stock_notes'          => ! empty( $_POST['lp_enable_stock_notes'] ) ? 'yes' : 'no',
+            'reminder_delay_days'         => isset( $_POST['lp_reminder_delay_days'] ) ? absint( $_POST['lp_reminder_delay_days'] ) : 3,
+            'reminder_max_count'          => isset( $_POST['lp_reminder_max_count'] ) ? absint( $_POST['lp_reminder_max_count'] ) : 3,
+            'reminder_max_age_days'       => isset( $_POST['lp_reminder_max_age_days'] ) ? absint( $_POST['lp_reminder_max_age_days'] ) : 7,
+            'cleanup_resolved_after_days' => isset( $_POST['lp_cleanup_resolved_after_days'] ) ? absint( $_POST['lp_cleanup_resolved_after_days'] ) : 30,
+            'show_stock_preview'          => ! empty( $_POST['lp_show_stock_preview'] ) ? 'yes' : 'no',
+            'portal_base_url'             => isset( $_POST['lp_portal_base_url'] ) ? sanitize_text_field( wp_unslash( $_POST['lp_portal_base_url'] ) ) : '',
+            'alt_price_handling'          => isset( $_POST['lp_alt_price_handling'] ) && 'store_covers' === $_POST['lp_alt_price_handling'] ? 'store_covers' : 'charge_customer',
+        );
+
+        self::update_settings( $settings );
+
+        wp_safe_redirect( add_query_arg( 'updated', 'true', admin_url( 'admin.php?page=lp-missing-settings' ) ) );
+        exit;
+    }
+
+    public static function render_settings_page() {
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            return;
+        }
+
+        $settings = self::get_settings();
+        ?>
+        <div class="wrap">
+            <h1><?php esc_html_e( 'Missing Items Settings', 'lp-missing' ); ?></h1>
+            <?php if ( isset( $_GET['updated'] ) ) : ?>
+                <div class="updated notice is-dismissible"><p><?php esc_html_e( 'Settings saved.', 'lp-missing' ); ?></p></div>
+            <?php endif; ?>
+            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                <?php wp_nonce_field( 'lp_missing_settings' ); ?>
+                <input type="hidden" name="action" value="lp_missing_save_settings" />
+                <table class="form-table" role="presentation">
+                    <tbody>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Lock stock for missing quantities', 'lp-missing' ); ?></th>
+                            <td>
+                                <label><input type="checkbox" name="lp_enable_stock_lock" value="1" <?php checked( 'yes', $settings['enable_stock_lock'] ); ?> /> <?php esc_html_e( 'Adjust inventory when items are marked missing.', 'lp-missing' ); ?></label>
+                                <p class="description"><?php esc_html_e( 'Disabling this will stop automatic stock decreases/increases for missing lines.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Add inventory history notes', 'lp-missing' ); ?></th>
+                            <td>
+                                <label><input type="checkbox" name="lp_enable_stock_notes" value="1" <?php checked( 'yes', $settings['enable_stock_notes'] ); ?> /> <?php esc_html_e( 'Write order notes when stock is adjusted.', 'lp-missing' ); ?></label>
+                                <p class="description"><?php esc_html_e( 'Keep inventory audit trails concise by disabling stock adjustment notes if needed.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Reminder spacing (days)', 'lp-missing' ); ?></th>
+                            <td>
+                                <input type="number" min="1" name="lp_reminder_delay_days" value="<?php echo esc_attr( $settings['reminder_delay_days'] ); ?>" />
+                                <p class="description"><?php esc_html_e( 'Controls how soon the first and subsequent reminders are sent after an item is marked missing.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Maximum reminders before escalation', 'lp-missing' ); ?></th>
+                            <td>
+                                <input type="number" min="1" name="lp_reminder_max_count" value="<?php echo esc_attr( $settings['reminder_max_count'] ); ?>" />
+                                <p class="description"><?php esc_html_e( 'After this many reminders, the line will be flagged for manual follow-up.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Maximum age before escalation (days)', 'lp-missing' ); ?></th>
+                            <td>
+                                <input type="number" min="1" name="lp_reminder_max_age_days" value="<?php echo esc_attr( $settings['reminder_max_age_days'] ); ?>" />
+                                <p class="description"><?php esc_html_e( 'If a line stays missing longer than this, it will be escalated even if reminder limits are not reached.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Cleanup resolved records after (days)', 'lp-missing' ); ?></th>
+                            <td>
+                                <input type="number" min="<?php echo esc_attr( self::CLEANUP_MIN_DAYS ); ?>" name="lp_cleanup_resolved_after_days" value="<?php echo esc_attr( $settings['cleanup_resolved_after_days'] ); ?>" />
+                                <p class="description"><?php printf( esc_html__( 'Resolved missing-item data will be removed after this many days (minimum %d days).', 'lp-missing' ), self::CLEANUP_MIN_DAYS ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Show stock in alternative previews', 'lp-missing' ); ?></th>
+                            <td>
+                                <label><input type="checkbox" name="lp_show_stock_preview" value="1" <?php checked( 'yes', $settings['show_stock_preview'] ); ?> /> <?php esc_html_e( 'Display stock quantities and availability for suggested alternatives.', 'lp-missing' ); ?></label>
+                                <p class="description"><?php esc_html_e( 'Disable to simplify the metabox for teams that do not need stock hints when picking alternatives.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Price differences for alternatives', 'lp-missing' ); ?></th>
+                            <td>
+                                <fieldset>
+                                    <label><input type="radio" name="lp_alt_price_handling" value="charge_customer" <?php checked( 'charge_customer', $settings['alt_price_handling'] ); ?> /> <?php esc_html_e( 'Charge the customer for more expensive alternatives.', 'lp-missing' ); ?></label><br />
+                                    <label><input type="radio" name="lp_alt_price_handling" value="store_covers" <?php checked( 'store_covers', $settings['alt_price_handling'] ); ?> /> <?php esc_html_e( 'Store covers the extra cost (no charge to customer).', 'lp-missing' ); ?></label>
+                                </fieldset>
+                                <p class="description"><?php esc_html_e( 'Controls whether a surcharge order is raised when the chosen alternative costs more than the original item.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Customer portal base URL', 'lp-missing' ); ?></th>
+                            <td>
+                                <input type="url" class="regular-text" name="lp_portal_base_url" value="<?php echo esc_attr( $settings['portal_base_url'] ); ?>" placeholder="<?php echo esc_attr( wc_get_page_permalink( 'myaccount' ) ); ?>" />
+                                <p class="description"><?php esc_html_e( 'Magic links in customer emails will point here. Leave blank to default to the My Account page.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <?php submit_button( __( 'Save settings', 'lp-missing' ) ); ?>
+            </form>
+        </div>
+        <?php
+    }
+
+    public static function register_email_class( $emails ) {
+        $emails['lp_missing_customer_email'] = new LP_Missing_Product_Email();
+        $emails['lp_missing_customer_reminder'] = new LP_Missing_Product_Reminder_Email();
+        return $emails;
+    }
+
+    public static function save_metabox( $post_id, $post ) {
+        if ( ! isset( $_POST['lp_missing_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lp_missing_nonce'] ) ), 'lp_missing_metabox' ) ) {
+            return;
+        }
+        if ( ! current_user_can( 'edit_shop_order', $post_id ) ) {
+            return;
+        }
+        if ( empty( $_POST['lp_missing_items'] ) || ! is_array( $_POST['lp_missing_items'] ) ) {
+            return;
+        }
+
+        $order = wc_get_order( $post_id );
+        if ( ! $order ) {
+            return;
+        }
+
+        $items = $order->get_items( 'line_item' );
+        foreach ( $items as $item_id => $item ) {
+            $existing = self::get_item_data( $item );
+            $posted   = isset( $_POST['lp_missing_items'][ $item_id ] ) && is_array( $_POST['lp_missing_items'][ $item_id ] ) ? $_POST['lp_missing_items'][ $item_id ] : array();
+
+            $missing = ! empty( $posted['missing'] );
+            $propose_delete = ! empty( $posted['propose_delete'] );
+            $qty_missing = isset( $posted['qty_missing'] ) ? max( 0, absint( $posted['qty_missing'] ) ) : 0;
+            $notes = isset( $posted['notes'] ) ? wp_kses_post( wp_unslash( $posted['notes'] ) ) : '';
+            $internal_notes = isset( $posted['internal_notes'] ) ? wp_kses_post( wp_unslash( $posted['internal_notes'] ) ) : '';
+            $alt_ids = isset( $posted['alternatives'] ) ? self::sanitize_alt_ids( wp_unslash( $posted['alternatives'] ) ) : array();
+
+            $was_missing = ! empty( $existing['missing'] );
+
+            $new_data = $existing;
+            $new_data['missing'] = $missing;
+            $new_data['propose_delete'] = $missing && $propose_delete;
+            $new_data['qty_missing'] = $missing ? $qty_missing : 0;
+            $new_data['notes'] = $missing ? $notes : '';
+            $new_data['internal_notes'] = $missing ? $internal_notes : '';
+            $new_data['alternatives'] = $missing ? $alt_ids : array();
+            $new_data['last_updated'] = time();
+
+            if ( $missing && ! $was_missing ) {
+                $new_data['first_missing_at'] = time();
+                $new_data['reminder_count'] = 0;
+                $new_data['last_reminder_at'] = 0;
+                $new_data['reminder_scheduled_for'] = 0;
+                $new_data['needs_attention'] = false;
+                $new_data['resolved_at'] = 0;
+            }
+
+            if ( ! $missing ) {
+                $new_data['status'] = 'cleared';
+                $new_data['selected_alt_id'] = 0;
+                $new_data['qty_alt'] = 0;
+                $new_data['first_missing_at'] = 0;
+                $new_data['reminder_count'] = 0;
+                $new_data['last_reminder_at'] = 0;
+                $new_data['reminder_scheduled_for'] = 0;
+                $new_data['needs_attention'] = false;
+                $new_data['resolved_at'] = time();
+            } elseif ( ! self::is_line_resolved( $new_data ) ) {
+                $new_data['resolved_at'] = 0;
+            }
+
+            $new_data['reminder_scheduled_for'] = $missing ? $new_data['reminder_scheduled_for'] : 0;
+
+            self::maybe_adjust_stock( $item, $existing, $new_data, $order );
+
+            if ( serialize( $existing ) !== serialize( $new_data ) ) {
+                $item->update_meta_data( self::META_KEY, $new_data );
+                $item->save();
+                do_action( 'lp_missing_item_updated', $order, $item_id, $new_data, $existing );
+            } else {
+                $item->update_meta_data( self::META_KEY, $new_data );
+                $item->save();
+            }
+        }
+
+        self::refresh_order_flags( $order );
+    }
+
+    protected static function maybe_adjust_stock( $item, $existing, &$new_data, $order ) {
+        if ( ! self::stock_lock_enabled() ) {
+            $new_data['stock_locked_qty'] = $new_data['qty_missing'];
+            return;
+        }
+        $product = $item->get_product();
+        if ( ! $product || ! $product->managing_stock() ) {
+            $new_data['stock_locked_qty'] = $new_data['qty_missing'];
+            return;
+        }
+
+        $previous_lock = isset( $existing['stock_locked_qty'] ) ? absint( $existing['stock_locked_qty'] ) : 0;
+        $new_lock      = $new_data['qty_missing'];
+        $delta         = $new_lock - $previous_lock;
+        if ( 0 === $delta ) {
+            $new_data['stock_locked_qty'] = $new_lock;
+            return;
+        }
+
+        $settings   = self::get_settings();
+        $add_notes  = 'yes' === $settings['enable_stock_notes'];
+
+        if ( $delta > 0 ) {
+            wc_update_product_stock( $product, $delta, 'decrease' );
+            if ( $add_notes ) {
+                $order->add_order_note( sprintf( __( 'Inventory decreased by %1$s for product %2$s. Reason: Missing-item stock lock delta.', 'lp-missing' ), $delta, $product->get_name() ) );
+            }
+        } else {
+            wc_update_product_stock( $product, abs( $delta ), 'increase' );
+            if ( $add_notes ) {
+                $order->add_order_note( sprintf( __( 'Inventory increased by %1$s for product %2$s. Reason: Missing-item stock lock delta.', 'lp-missing' ), abs( $delta ), $product->get_name() ) );
+            }
+        }
+        $new_data['stock_locked_qty'] = $new_lock;
+    }
+
+    protected static function is_line_resolved( $data ) {
+        $resolved_statuses = array( 'alt_applied', 'delete_applied', 'cleared' );
+        return empty( $data['missing'] ) || in_array( $data['status'], $resolved_statuses, true );
+    }
+
+    protected static function has_customer_decision( $data ) {
+        $decision_statuses = array( 'alt_pending', 'delete_pending', 'declined', 'alt_applied', 'delete_applied' );
+        return in_array( $data['status'], $decision_statuses, true );
+    }
+
+    protected static function schedule_reminder_for_item( $order, $item_id, $delay_days = null ) {
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        $item = $order->get_item( $item_id );
+        if ( ! $item ) {
+            return;
+        }
+        $data = self::get_item_data( $item );
+        if ( self::is_line_resolved( $data ) ) {
+            return;
+        }
+
+        $settings = self::get_settings();
+        $delay_days = is_null( $delay_days ) ? $settings['reminder_delay_days'] : absint( $delay_days );
+        if ( $delay_days < 1 ) {
+            $delay_days = $settings['reminder_delay_days'];
+        }
+
+        while ( $scheduled = wp_next_scheduled( 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) ) ) {
+            wp_unschedule_event( $scheduled, 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) );
+        }
+
+        $timestamp = time() + ( $delay_days * DAY_IN_SECONDS );
+        wp_schedule_single_event( $timestamp, 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) );
+
+        $data['reminder_scheduled_for'] = $timestamp;
+        if ( empty( $data['first_missing_at'] ) ) {
+            $data['first_missing_at'] = time();
+        }
+        $item->update_meta_data( self::META_KEY, $data );
+        $item->save();
+    }
+
+    protected static function cancel_reminder_for_item( $order, $item_id ) {
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        while ( $scheduled = wp_next_scheduled( 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) ) ) {
+            wp_unschedule_event( $scheduled, 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) );
+        }
+        $item = $order->get_item( $item_id );
+        if ( $item ) {
+            $data = self::get_item_data( $item );
+            $data['reminder_scheduled_for'] = 0;
+            $data['needs_attention'] = false;
+            $item->update_meta_data( self::META_KEY, $data );
+            $item->save();
+        }
+    }
+
+    protected static function schedule_cleanup_for_order( $order ) {
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+
+        $settings  = self::get_settings();
+        $threshold = max( self::CLEANUP_MIN_DAYS, absint( $settings['cleanup_resolved_after_days'] ) ) * DAY_IN_SECONDS;
+        $items     = $order->get_items( 'line_item' );
+        $next_time = 0;
+
+        foreach ( $items as $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! self::is_line_resolved( $data ) ) {
+                continue;
+            }
+            $resolved_at = ! empty( $data['resolved_at'] ) ? $data['resolved_at'] : ( $data['last_updated'] ? $data['last_updated'] : time() );
+            $candidate   = $resolved_at + $threshold;
+            if ( 0 === $next_time || $candidate < $next_time ) {
+                $next_time = $candidate;
+            }
+        }
+
+        $existing = wp_next_scheduled( self::CLEANUP_HOOK, array( $order->get_id() ) );
+
+        if ( ! $next_time ) {
+            while ( $existing ) {
+                wp_unschedule_event( $existing, self::CLEANUP_HOOK, array( $order->get_id() ) );
+                $existing = wp_next_scheduled( self::CLEANUP_HOOK, array( $order->get_id() ) );
+            }
+            return;
+        }
+
+        if ( $existing && $existing <= $next_time ) {
+            return;
+        }
+
+        if ( $existing ) {
+            wp_unschedule_event( $existing, self::CLEANUP_HOOK, array( $order->get_id() ) );
+        }
+
+        wp_schedule_single_event( $next_time, self::CLEANUP_HOOK, array( $order->get_id() ) );
+    }
+
+    public static function maybe_schedule_daily_cleanup() {
+        if ( ! wp_next_scheduled( self::DAILY_CLEANUP_HOOK ) ) {
+            wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', self::DAILY_CLEANUP_HOOK );
+        }
+    }
+
+    protected static function get_order_last_activity_timestamp( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return 0;
+        }
+
+        $modified = $order->get_date_modified();
+        $created  = $order->get_date_created();
+
+        $modified_ts = $modified ? $modified->getTimestamp() : 0;
+        $created_ts  = $created ? $created->getTimestamp() : 0;
+
+        return max( $modified_ts, $created_ts );
+    }
+
+    protected static function purge_missing_data_for_order( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return false;
+        }
+
+        $changed = false;
+
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            if ( ! metadata_exists( 'order_item', $item->get_id(), self::META_KEY ) ) {
+                continue;
+            }
+            $item->delete_meta_data( self::META_KEY );
+            $item->save();
+            $changed = true;
+        }
+
+        if ( $changed ) {
+            while ( $existing = wp_next_scheduled( self::CLEANUP_HOOK, array( $order->get_id() ) ) ) {
+                wp_unschedule_event( $existing, self::CLEANUP_HOOK, array( $order->get_id() ) );
+            }
+            $order->delete_meta_data( self::OPTION_ATTENTION_FLAG );
+            $order->delete_meta_data( self::OPTION_HAS_OPEN_MISSING );
+            $order->delete_meta_data( self::OPTION_HAS_MISSING_DATA );
+            $order->save();
+        }
+
+        return $changed;
+    }
+
+    public static function run_daily_cleanup() {
+        $settings  = self::get_settings();
+        $threshold = max( self::CLEANUP_MIN_DAYS, absint( $settings['cleanup_resolved_after_days'] ) ) * DAY_IN_SECONDS;
+        $limit     = apply_filters( 'lp_missing_daily_cleanup_limit', self::DAILY_CLEANUP_LIMIT );
+
+        $orders = wc_get_orders( array(
+            'limit'      => $limit,
+            'return'     => 'objects',
+            'orderby'    => 'date_modified',
+            'order'      => 'ASC',
+            'meta_query' => array(
+                'relation' => 'OR',
+                array(
+                    'key'     => self::OPTION_HAS_MISSING_DATA,
+                    'value'   => 'yes',
+                    'compare' => '=',
+                ),
+                array(
+                    'key'     => self::OPTION_ATTENTION_FLAG,
+                    'value'   => 'yes',
+                    'compare' => '=',
+                ),
+            ),
+        ) );
+
+        if ( empty( $orders ) ) {
+            return;
+        }
+
+        foreach ( $orders as $order ) {
+            if ( self::order_has_open_missing_items( $order ) ) {
+                continue;
+            }
+
+            $last_activity = self::get_order_last_activity_timestamp( $order );
+            if ( ! $last_activity ) {
+                continue;
+            }
+
+            if ( ( time() - $last_activity ) < $threshold ) {
+                continue;
+            }
+
+            if ( self::purge_missing_data_for_order( $order ) ) {
+                $order->add_order_note( __( 'Missing-item data automatically cleaned up after resolution.', 'lp-missing' ) );
+            }
+        }
+    }
+
+    protected static function refresh_order_attention_flag( $order ) {
+        self::refresh_order_flags( $order );
+    }
+
+    public static function handle_item_updated( $order, $item_id, $new_data, $old_data ) {
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+
+        $item = $order->get_item( $item_id );
+        if ( ! $item ) {
+            return;
+        }
+
+        $new_missing = ! empty( $new_data['missing'] );
+        $was_missing = ! empty( $old_data['missing'] );
+        $resolved    = self::is_line_resolved( $new_data );
+
+        if ( $new_missing && empty( $new_data['first_missing_at'] ) ) {
+            $new_data['first_missing_at'] = time();
+            $item->update_meta_data( self::META_KEY, $new_data );
+            $item->save();
+        }
+
+        if ( $new_missing && ! $was_missing ) {
+            if ( self::order_has_missing_items( $order ) && empty( self::$auto_email_sent[ $order->get_id() ] ) ) {
+                self::send_customer_email( $order );
+                self::$auto_email_sent[ $order->get_id() ] = true;
+            }
+            self::schedule_reminder_for_item( $order, $item_id );
+            return;
+        }
+
+        if ( $resolved ) {
+            if ( empty( $new_data['resolved_at'] ) ) {
+                $new_data['resolved_at'] = time();
+                $item->update_meta_data( self::META_KEY, $new_data );
+                $item->save();
+            }
+            self::cancel_reminder_for_item( $order, $item_id );
+            self::refresh_order_attention_flag( $order );
+            self::schedule_cleanup_for_order( $order );
+            return;
+        }
+
+        if ( self::has_customer_decision( $new_data ) ) {
+            self::cancel_reminder_for_item( $order, $item_id );
+            self::refresh_order_attention_flag( $order );
+            return;
+        }
+
+        if ( ! $resolved && ! empty( $new_data['resolved_at'] ) ) {
+            $new_data['resolved_at'] = 0;
+            $item->update_meta_data( self::META_KEY, $new_data );
+            $item->save();
+        }
+    }
+
+    public static function handle_scheduled_reminder( $order_id, $item_id ) {
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            return;
+        }
+        $item = $order->get_item( $item_id );
+        if ( ! $item ) {
+            return;
+        }
+        $data = self::get_item_data( $item );
+
+        if ( self::is_line_resolved( $data ) ) {
+            self::cancel_reminder_for_item( $order, $item_id );
+            self::refresh_order_attention_flag( $order );
+            return;
+        }
+
+        if ( empty( $data['missing'] ) ) {
+            self::cancel_reminder_for_item( $order, $item_id );
+            self::refresh_order_attention_flag( $order );
+            return;
+        }
+
+        $sent = self::send_reminder_email( $order, $item_id );
+
+        $data['first_missing_at'] = $data['first_missing_at'] ? $data['first_missing_at'] : time();
+        if ( $sent ) {
+            $data['reminder_count'] = $data['reminder_count'] + 1;
+            $data['last_reminder_at'] = time();
+        }
+        $data['reminder_scheduled_for'] = 0;
+
+        $item->update_meta_data( self::META_KEY, $data );
+        $item->save();
+
+        if ( ! $sent ) {
+            self::schedule_reminder_for_item( $order, $item_id );
+            return;
+        }
+
+        $age_days = $data['first_missing_at'] ? floor( ( time() - $data['first_missing_at'] ) / DAY_IN_SECONDS ) : 0;
+        $settings = self::get_settings();
+        if ( $data['reminder_count'] >= $settings['reminder_max_count'] || $age_days >= $settings['reminder_max_age_days'] ) {
+            if ( empty( $data['needs_attention'] ) ) {
+                $note = sprintf(
+                    __( 'Manual follow-up needed: Item %1$s has %2$d reminder(s) over %3$d day(s).', 'lp-missing' ),
+                    $item->get_name(),
+                    $data['reminder_count'],
+                    max( 0, $age_days )
+                );
+                $order->add_order_note( $note );
+            }
+            $data['needs_attention'] = true;
+            $item->update_meta_data( self::META_KEY, $data );
+            $item->save();
+            $order->update_meta_data( self::OPTION_ATTENTION_FLAG, 'yes' );
+            $order->save();
+            return;
+        }
+
+        self::schedule_reminder_for_item( $order, $item_id );
+    }
+
+    public static function handle_cleanup_order( $order_id ) {
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            return;
+        }
+
+        $settings  = self::get_settings();
+        $threshold = max( self::CLEANUP_MIN_DAYS, absint( $settings['cleanup_resolved_after_days'] ) ) * DAY_IN_SECONDS;
+        $items     = $order->get_items( 'line_item' );
+        $next_time = 0;
+        $changed   = false;
+
+        foreach ( $items as $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! self::is_line_resolved( $data ) ) {
+                continue;
+            }
+
+            $resolved_at = ! empty( $data['resolved_at'] ) ? $data['resolved_at'] : ( $data['last_updated'] ? $data['last_updated'] : time() );
+            $age         = time() - $resolved_at;
+
+            if ( $age >= $threshold ) {
+                $item->delete_meta_data( self::META_KEY );
+                $item->save();
+                $changed = true;
+                continue;
+            }
+
+            $candidate = $resolved_at + $threshold;
+            if ( 0 === $next_time || $candidate < $next_time ) {
+                $next_time = $candidate;
+            }
+        }
+
+        if ( $changed ) {
+            self::refresh_order_attention_flag( $order );
+        }
+
+        if ( $next_time ) {
+            $existing = wp_next_scheduled( self::CLEANUP_HOOK, array( $order->get_id() ) );
+            if ( $existing && $existing > $next_time ) {
+                wp_unschedule_event( $existing, self::CLEANUP_HOOK, array( $order->get_id() ) );
+            }
+        }
+
+        self::schedule_cleanup_for_order( $order );
+    }
+
+    public static function ajax_search_products() {
+        if ( ! current_user_can( 'edit_shop_orders' ) ) {
+            wp_send_json_error();
+        }
+        $nonce = isset( $_GET['nonce'] ) ? sanitize_text_field( wp_unslash( $_GET['nonce'] ) ) : '';
+        if ( ! wp_verify_nonce( $nonce, self::AJAX_NONCE_ACTION ) ) {
+            wp_send_json_error();
+        }
+        $term = isset( $_GET['term'] ) ? sanitize_text_field( wp_unslash( $_GET['term'] ) ) : '';
+        if ( strlen( $term ) < 2 ) {
+            wp_send_json_success( array() );
+        }
+
+        $query = new WP_Query( array(
+            'post_type'      => array( 'product', 'product_variation' ),
+            'post_status'    => array( 'publish', 'private' ),
+            'posts_per_page' => 15,
+            'fields'         => 'ids',
+            's'              => $term,
+            'meta_query'     => array(
+                'relation' => 'OR',
+                array(
+                    'key'     => '_sku',
+                    'value'   => $term,
+                    'compare' => 'LIKE',
+                ),
+            ),
+        ) );
+
+        $results = array();
+        if ( $query->have_posts() ) {
+            $products = wc_get_products( array( 'include' => $query->posts, 'limit' => 15 ) );
+            foreach ( $products as $product ) {
+                $results[] = array(
+                    'id'    => $product->get_id(),
+                    'title' => $product->get_name(),
+                );
+            }
+        }
+
+        wp_send_json_success( $results );
+    }
+
+    public static function ajax_preview_product() {
+        if ( ! current_user_can( 'edit_shop_orders' ) ) {
+            wp_send_json_error();
+        }
+        $nonce = isset( $_GET['nonce'] ) ? sanitize_text_field( wp_unslash( $_GET['nonce'] ) ) : '';
+        if ( ! wp_verify_nonce( $nonce, self::AJAX_NONCE_ACTION ) ) {
+            wp_send_json_error();
+        }
+        $product_id = isset( $_GET['product_id'] ) ? absint( $_GET['product_id'] ) : 0;
+        if ( ! $product_id ) {
+            wp_send_json_error();
+        }
+        $product = wc_get_product( $product_id );
+        if ( ! $product ) {
+            wp_send_json_error();
+        }
+        $settings = self::get_settings();
+        $include_stock = 'yes' === $settings['show_stock_preview'];
+
+        $data = array(
+            'id'             => $product->get_id(),
+            'title'          => $product->get_name(),
+            'sku'            => $product->get_sku(),
+            'in_stock'       => $include_stock ? $product->is_in_stock() : null,
+            'stock_quantity' => ( $include_stock && $product->managing_stock() ) ? $product->get_stock_quantity() : null,
+            'thumbnail'      => wp_get_attachment_image_url( $product->get_image_id(), 'thumbnail' ),
+        );
+        wp_send_json_success( $data );
+    }
+
+    protected static function get_order_for_shortcode( $atts ) {
+        $order_id = isset( $atts['order_id'] ) ? absint( $atts['order_id'] ) : 0;
+        $email    = isset( $atts['email'] ) ? sanitize_email( $atts['email'] ) : '';
+        if ( ! $order_id || ! $email ) {
+            return array( null, '' );
+        }
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            return array( null, '' );
+        }
+        if ( strtolower( $order->get_billing_email() ) !== strtolower( $email ) ) {
+            return array( null, '' );
+        }
+        return array( $order, $email );
+    }
+
+    protected static function get_order_from_magic_link() {
+        $order_id = isset( $_GET['oid'] ) ? absint( $_GET['oid'] ) : 0;
+        $key      = isset( $_GET['key'] ) ? sanitize_text_field( wp_unslash( $_GET['key'] ) ) : '';
+        if ( ! $order_id || ! $key ) {
+            return array( null, '', '' );
+        }
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            return array( null, '', __( 'This link is invalid or expired.', 'lp-missing' ) );
+        }
+        if ( ! self::validate_signature( $order_id, $order->get_billing_email(), $key ) ) {
+            return array( null, '', __( 'This link is invalid or expired.', 'lp-missing' ) );
+        }
+        return array( $order, $order->get_billing_email(), '' );
+    }
+
+    protected static function verify_customer_email( $order, &$error ) {
+        $error         = '';
+        $billing_email = $order->get_billing_email();
+        if ( ! $billing_email ) {
+            return false;
+        }
+        if ( is_user_logged_in() ) {
+            $user = wp_get_current_user();
+            if ( $user && strtolower( $user->user_email ) === strtolower( $billing_email ) ) {
+                return true;
+            }
+        }
+        if ( isset( $_POST['lp_missing_verify_email'] ) ) {
+            $nonce = isset( $_POST['lp_missing_verify_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['lp_missing_verify_nonce'] ) ) : '';
+            if ( ! wp_verify_nonce( $nonce, 'lp_missing_verify_' . $order->get_id() ) ) {
+                $error = __( 'Security check failed. Please try again.', 'lp-missing' );
+                return false;
+            }
+            $submitted = sanitize_email( wp_unslash( $_POST['lp_missing_verify_email'] ) );
+            if ( $submitted && strtolower( $submitted ) === strtolower( $billing_email ) ) {
+                return true;
+            }
+            $error = __( 'Email does not match our records for this order.', 'lp-missing' );
+        }
+        return false;
+    }
+
+    protected static function rate_limit_key( $order_id, $email ) {
+        return 'lp_missing_rate_' . $order_id . '_' . md5( strtolower( $email ) );
+    }
+
+    protected static function handle_portal_action( $order, $email ) {
+        if ( empty( $_POST['lp_missing_action'] ) || empty( $_POST['lp_missing_nonce'] ) ) {
+            return array( 'message' => '', 'status' => '' );
+        }
+        if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lp_missing_nonce'] ) ), 'lp_missing_portal_' . $order->get_id() ) ) {
+            return array( 'message' => __( 'Security check failed.', 'lp-missing' ), 'status' => 'error' );
+        }
+        if ( strtolower( $order->get_billing_email() ) !== strtolower( $email ) ) {
+            return array( 'message' => __( 'Email does not match this order.', 'lp-missing' ), 'status' => 'error' );
+        }
+        $key = self::rate_limit_key( $order->get_id(), $email );
+        $count = (int) get_transient( $key );
+        if ( $count >= 5 ) {
+            return array( 'message' => __( 'Too many actions. Please wait and try again.', 'lp-missing' ), 'status' => 'error' );
+        }
+        set_transient( $key, $count + 1, MINUTE_IN_SECONDS );
+
+        $action    = sanitize_text_field( wp_unslash( $_POST['lp_missing_action'] ) );
+        $item_id   = isset( $_POST['lp_missing_item_id'] ) ? absint( $_POST['lp_missing_item_id'] ) : 0;
+        $items     = $order->get_items( 'line_item' );
+        $item      = isset( $items[ $item_id ] ) ? $items[ $item_id ] : null;
+        if ( ! $item ) {
+            return array( 'message' => __( 'Invalid item selected.', 'lp-missing' ), 'status' => 'error' );
+        }
+
+        $existing = self::get_item_data( $item );
+        if ( empty( $existing['missing'] ) ) {
+            return array( 'message' => __( 'Item is not marked as missing.', 'lp-missing' ), 'status' => 'error' );
+        }
+
+        $new = $existing;
+        $new['last_updated'] = time();
+
+        if ( 'accept_alt' === $action ) {
+            $alt_id = isset( $_POST['lp_missing_alt_id'] ) ? absint( $_POST['lp_missing_alt_id'] ) : 0;
+            $qty_alt = isset( $_POST['lp_missing_alt_qty'] ) ? absint( $_POST['lp_missing_alt_qty'] ) : 0;
+            if ( $qty_alt < 1 || $qty_alt > $existing['qty_missing'] ) {
+                return array( 'message' => __( 'Invalid quantity selected.', 'lp-missing' ), 'status' => 'error' );
+            }
+            if ( ! in_array( $alt_id, $existing['alternatives'], true ) ) {
+                return array( 'message' => __( 'Alternative not allowed.', 'lp-missing' ), 'status' => 'error' );
+            }
+            $new['status'] = 'alt_pending';
+            $new['selected_alt_id'] = $alt_id;
+            $new['qty_alt'] = $qty_alt;
+        } elseif ( 'decline_all' === $action ) {
+            $new['status'] = 'declined';
+            $new['selected_alt_id'] = 0;
+            $new['qty_alt'] = 0;
+        } elseif ( 'accept_delete' === $action ) {
+            if ( empty( $existing['propose_delete'] ) ) {
+                return array( 'message' => __( 'Deletion not available for this item.', 'lp-missing' ), 'status' => 'error' );
+            }
+            $new['status'] = 'delete_pending';
+        } else {
+            return array( 'message' => __( 'Unknown action.', 'lp-missing' ), 'status' => 'error' );
+        }
+
+        if ( in_array( $new['status'], array( 'alt_pending', 'delete_pending' ), true ) ) {
+            $new['needs_attention'] = false;
+            $new['reminder_scheduled_for'] = 0;
+            $new['decision_made_at'] = time();
+            $new['resolved_at'] = 0;
+        }
+
+        if ( ! self::is_line_resolved( $new ) ) {
+            $new['resolved_at'] = 0;
+        }
+
+        if ( serialize( $existing ) !== serialize( $new ) ) {
+            $item->update_meta_data( self::META_KEY, $new );
+            $item->save();
+            do_action( 'lp_missing_item_updated', $order, $item_id, $new, $existing );
+        }
+
+        return array( 'message' => __( 'Your choice has been saved.', 'lp-missing' ), 'status' => 'success' );
+    }
+
+    public static function render_shortcode( $atts ) {
+        $atts = shortcode_atts( array(
+            'order_id' => 0,
+            'email'    => '',
+        ), $atts, self::SHORTCODE );
+
+        list( $order, $email, $link_error ) = self::get_order_from_magic_link();
+        $using_magic   = $order instanceof WC_Order;
+        $verify_error  = '';
+        $response      = array( 'message' => '', 'status' => '' );
+
+        if ( $link_error ) {
+            return '<div class="lp-missing-portal-error">' . esc_html( $link_error ) . '</div>';
+        }
+
+        if ( ! $using_magic ) {
+            list( $order, $email ) = self::get_order_for_shortcode( $atts );
+            if ( ! $order ) {
+                return '<div class="lp-missing-portal-error">' . esc_html__( 'Order not found or email does not match.', 'lp-missing' ) . '</div>';
+            }
+            $email_verified = true;
+        } else {
+            $email_verified = self::verify_customer_email( $order, $verify_error );
+        }
+
+        if ( $using_magic && ! $email_verified ) {
+            ob_start();
+            if ( $verify_error ) {
+                echo '<div class="lp-missing-portal-error">' . esc_html( $verify_error ) . '</div>';
+            }
+            echo '<div class="lp-missing-portal-verify">';
+            echo '<p>' . esc_html__( 'Please confirm the email you used at checkout to continue.', 'lp-missing' ) . '</p>';
+            echo '<form method="post">';
+            wp_nonce_field( 'lp_missing_verify_' . $order->get_id(), 'lp_missing_verify_nonce' );
+            echo '<label>' . esc_html__( 'Email address', 'lp-missing' ) . ' <input type="email" name="lp_missing_verify_email" required /></label> ';
+            echo '<button type="submit">' . esc_html__( 'Continue', 'lp-missing' ) . '</button>';
+            echo '</form>';
+            echo '</div>';
+            return ob_get_clean();
+        }
+
+        $email    = $order->get_billing_email();
+        $response = self::handle_portal_action( $order, $email );
+        $items    = $order->get_items( 'line_item' );
+        $missing_items = array();
+        $alt_ids = array();
+        foreach ( $items as $item_id => $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! empty( $data['missing'] ) && ! self::is_line_resolved( $data ) ) {
+                $missing_items[ $item_id ] = array( 'item' => $item, 'data' => $data );
+                if ( ! empty( $data['alternatives'] ) ) {
+                    $alt_ids = array_merge( $alt_ids, $data['alternatives'] );
+                }
+            }
+        }
+        if ( empty( $missing_items ) ) {
+            return '<div class="lp-missing-portal-empty">' . esc_html__( 'Nothing is waiting for your decision.', 'lp-missing' ) . '</div>';
+        }
+
+        $alt_products = array();
+        if ( $alt_ids ) {
+            $products = wc_get_products( array( 'include' => array_values( array_unique( $alt_ids ) ), 'limit' => -1 ) );
+            foreach ( $products as $product_obj ) {
+                $alt_products[ $product_obj->get_id() ] = $product_obj;
+            }
+        }
+
+        ob_start();
+        if ( ! empty( $response['message'] ) ) {
+            $class = 'success' === $response['status'] ? 'lp-message-success' : 'lp-message-error';
+            echo '<div class="' . esc_attr( $class ) . '">' . esc_html( $response['message'] ) . '</div>';
+        }
+        echo '<div class="lp-missing-portal">';
+        foreach ( $missing_items as $item_id => $payload ) {
+            $item = $payload['item'];
+            $data = $payload['data'];
+            $product = $item->get_product();
+            $product_name = $product ? $product->get_name() : $item->get_name();
+            echo '<div class="lp-portal-item" style="border:1px solid #ddd;padding:10px;margin-bottom:12px;">';
+            echo '<strong>' . esc_html( $product_name ) . '</strong>'; 
+            echo '<div>' . sprintf( esc_html__( 'Ordered: %1$s | Missing: %2$s', 'lp-missing' ), esc_html( $item->get_quantity() ), esc_html( $data['qty_missing'] ) ) . '</div>';
+            if ( ! empty( $data['notes'] ) ) {
+                echo '<div>' . esc_html( $data['notes'] ) . '</div>';
+            }
+            if ( ! empty( $data['alternatives'] ) ) {
+                echo '<div><em>' . esc_html__( 'Suggested alternatives:', 'lp-missing' ) . '</em><ul style="margin:6px 0 0; padding-left:18px;">';
+                foreach ( $data['alternatives'] as $alt_id ) {
+                    $alt_product = isset( $alt_products[ $alt_id ] ) ? $alt_products[ $alt_id ] : wc_get_product( $alt_id );
+                    if ( ! $alt_product ) {
+                        continue;
+                    }
+                    echo '<li>';
+                    echo '<a href="' . esc_url( get_permalink( $alt_product->get_id() ) ) . '" target="_blank" rel="noopener noreferrer">' . esc_html( $alt_product->get_name() ) . '</a>';
+                    $sku = $alt_product->get_sku();
+                    if ( $sku ) {
+                        echo ' <small>(' . esc_html( $sku ) . ')</small>';
+                    }
+                    echo '</li>';
+                }
+                echo '</ul></div>';
+            }
+
+            if ( self::has_customer_decision( $data ) ) {
+                echo '<div style="margin-top:8px;">' . esc_html__( 'Thanks! Your choice has been recorded. Our team will apply it soon.', 'lp-missing' ) . '</div>';
+                if ( 'alt_pending' === $data['status'] && ! empty( $data['selected_alt_id'] ) ) {
+                    $alt_product = isset( $alt_products[ $data['selected_alt_id'] ] ) ? $alt_products[ $data['selected_alt_id'] ] : wc_get_product( $data['selected_alt_id'] );
+                    if ( $alt_product ) {
+                        echo '<div><em>' . esc_html__( 'You picked:', 'lp-missing' ) . '</em> ' . esc_html( $alt_product->get_name() ) . ' &times; ' . esc_html( $data['qty_alt'] ? $data['qty_alt'] : $data['qty_missing'] ) . '</div>';
+                    }
+                } elseif ( 'delete_pending' === $data['status'] ) {
+                    echo '<div><em>' . esc_html__( 'You approved deleting this line.', 'lp-missing' ) . '</em></div>';
+                }
+            } else {
+                echo '<form method="post" style="margin-top:8px;">';
+                wp_nonce_field( 'lp_missing_portal_' . $order->get_id(), 'lp_missing_nonce' );
+                echo '<input type="hidden" name="lp_missing_item_id" value="' . absint( $item_id ) . '" />';
+
+                if ( ! empty( $data['alternatives'] ) ) {
+                    echo '<div style="margin-bottom:8px;">';
+                    echo '<label>' . esc_html__( 'Choose an alternative:', 'lp-missing' ) . ' ';
+                    echo '<select name="lp_missing_alt_id">';
+                    foreach ( $data['alternatives'] as $alt_id ) {
+                        $alt_product = isset( $alt_products[ $alt_id ] ) ? $alt_products[ $alt_id ] : wc_get_product( $alt_id );
+                        if ( ! $alt_product ) {
+                            continue;
+                        }
+                        echo '<option value="' . absint( $alt_id ) . '">' . esc_html( $alt_product->get_name() ) . '</option>';
+                    }
+                    echo '</select></label> ';
+                    echo '<label>' . esc_html__( 'Quantity', 'lp-missing' ) . ' <input type="number" min="1" max="' . esc_attr( $data['qty_missing'] ) . '" name="lp_missing_alt_qty" value="' . esc_attr( $data['qty_missing'] ) . '" style="width:70px;" /></label> ';
+                    echo '<button type="submit" name="lp_missing_action" value="accept_alt">' . esc_html__( 'Accept alternative', 'lp-missing' ) . '</button>';
+                    echo '</div>';
+                }
+
+                echo '<div style="margin-bottom:8px;">';
+                echo '<button type="submit" name="lp_missing_action" value="decline_all">' . esc_html__( 'Decline all alternatives', 'lp-missing' ) . '</button>';
+                echo '</div>';
+
+                if ( ! empty( $data['propose_delete'] ) ) {
+                    echo '<div style="margin-bottom:8px;">';
+                    echo '<button type="submit" name="lp_missing_action" value="accept_delete">' . esc_html__( 'Accept deletion of this item', 'lp-missing' ) . '</button>';
+                    echo '</div>';
+                }
+                echo '</form>';
+            }
+
+            echo '</div>';
+        }
+        echo '</div>';
+        return ob_get_clean();
+    }
+
+    protected static function count_orders_with_missing_meta( $meta_query ) {
+        $result = wc_get_orders( array(
+            'limit'      => 1,
+            'paginate'   => true,
+            'return'     => 'ids',
+            'meta_query' => $meta_query,
+        ) );
+
+        if ( is_array( $result ) && isset( $result['total'] ) ) {
+            return absint( $result['total'] );
+        }
+
+        if ( is_object( $result ) && isset( $result->total ) ) {
+            return absint( $result->total );
+        }
+
+        return 0;
+    }
+
+    public static function add_missing_orders_view( $views ) {
+        $meta_query = array(
+            'relation' => 'OR',
+            array(
+                'key'     => self::OPTION_HAS_OPEN_MISSING,
+                'value'   => 'yes',
+                'compare' => '=',
+            ),
+            array(
+                'key'     => self::OPTION_ATTENTION_FLAG,
+                'value'   => 'yes',
+                'compare' => '=',
+            ),
+        );
+
+        $count = self::count_orders_with_missing_meta( $meta_query );
+        $url   = add_query_arg( 'lp_missing_view', 'open', admin_url( 'edit.php?post_type=shop_order' ) );
+        $class = ( isset( $_GET['lp_missing_view'] ) && 'open' === $_GET['lp_missing_view'] ) ? 'class="current"' : '';
+
+        $views['lp_missing'] = '<a href="' . esc_url( $url ) . '" ' . $class . '>' . esc_html( sprintf( __( 'Missing items (%d)', 'lp-missing' ), $count ) ) . '</a>';
+        return $views;
+    }
+
+    public static function filter_missing_orders_view( $vars ) {
+        if ( empty( $_GET['lp_missing_view'] ) || 'open' !== $_GET['lp_missing_view'] ) {
+            return $vars;
+        }
+
+        $meta_query   = isset( $vars['meta_query'] ) ? (array) $vars['meta_query'] : array();
+        $meta_query[] = array(
+            'relation' => 'OR',
+            array(
+                'key'     => self::OPTION_HAS_OPEN_MISSING,
+                'value'   => 'yes',
+                'compare' => '=',
+            ),
+            array(
+                'key'     => self::OPTION_ATTENTION_FLAG,
+                'value'   => 'yes',
+                'compare' => '=',
+            ),
+        );
+
+        $vars['meta_query'] = $meta_query;
+        return $vars;
+    }
+
+    public static function register_missing_column( $columns ) {
+        $columns['lp_missing_status'] = __( 'Missing items', 'lp-missing' );
+        return $columns;
+    }
+
+    public static function render_missing_column( $column, $post_id ) {
+        if ( 'lp_missing_status' !== $column ) {
+            return;
+        }
+
+        $order = wc_get_order( $post_id );
+        if ( ! $order ) {
+            echo '&mdash;';
+            return;
+        }
+
+        $has_open   = 'yes' === $order->get_meta( self::OPTION_HAS_OPEN_MISSING );
+        $attention  = 'yes' === $order->get_meta( self::OPTION_ATTENTION_FLAG );
+        $has_data   = 'yes' === $order->get_meta( self::OPTION_HAS_MISSING_DATA );
+
+        if ( $has_open ) {
+            echo '<span class="dashicons dashicons-warning" style="color:#d63638;" aria-hidden="true"></span> ' . esc_html__( 'Awaiting resolution', 'lp-missing' );
+            return;
+        }
+
+        if ( $attention ) {
+            echo '<span class="dashicons dashicons-flag" style="color:#d63638;" aria-hidden="true"></span> ' . esc_html__( 'Needs follow-up', 'lp-missing' );
+            return;
+        }
+
+        if ( $has_data ) {
+            echo '<span class="dashicons dashicons-yes-alt" style="color:#2271b1;" aria-hidden="true"></span> ' . esc_html__( 'Resolved (cleanup pending)', 'lp-missing' );
+            return;
+        }
+
+        echo '&mdash;';
+    }
+}
+
+class LP_Missing_Product_Email extends WC_Email {
+
+    public function __construct() {
+        $this->id             = 'lp_missing_customer_email';
+        $this->customer_email = true;
+        $this->title          = __( 'Missing items customer portal', 'lp-missing' );
+        $this->description    = __( 'Email prompting customers to review missing item options via the secure portal.', 'lp-missing' );
+        $this->heading        = __( 'Action needed for your order', 'lp-missing' );
+        $this->subject        = __( 'Items missing from your order #{order_number}', 'lp-missing' );
+        $this->placeholders   = array(
+            '{order_number}' => '',
+            '{magic_link}'   => '',
+        );
+        parent::__construct();
+    }
+
+    public function trigger( $order_id ) {
+        $order = wc_get_order( $order_id );
+        if ( ! $order || ! LP_Missing_Product_Handler::order_has_missing_items( $order ) ) {
+            return;
+        }
+        $this->object     = $order;
+        $this->recipient  = $order->get_billing_email();
+        $this->placeholders['{order_number}'] = $order->get_order_number();
+        $this->placeholders['{magic_link}']   = LP_Missing_Product_Handler::get_magic_link_for_order( $order );
+
+        if ( ! $this->is_enabled() || ! $this->get_recipient() ) {
+            return;
+        }
+
+        $this->send( $this->get_recipient(), $this->get_subject(), $this->get_content(), $this->get_headers(), $this->get_attachments() );
+    }
+
+    public function get_content_html() {
+        ob_start();
+        wc_get_template( 'emails/email-header.php', array( 'email_heading' => $this->get_heading(), 'email' => $this ) );
+        ?>
+        <p><?php printf( esc_html__( 'Some items in your order %s are unavailable.', 'lp-missing' ), esc_html( $this->object->get_order_number() ) ); ?></p>
+        <p><?php esc_html_e( 'Please review your options using the secure link below.', 'lp-missing' ); ?></p>
+        <p>
+            <a class="button" href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php esc_html_e( 'Review options', 'lp-missing' ); ?></a>
+        </p>
+        <p><?php esc_html_e( 'If the button does not work, copy and paste this link into your browser:', 'lp-missing' ); ?><br />
+            <a href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php echo esc_html( $this->placeholders['{magic_link}'] ); ?></a>
+        </p>
+        <?php
+        wc_get_template( 'emails/email-footer.php', array( 'email' => $this ) );
+        return ob_get_clean();
+    }
+
+    public function get_content_plain() {
+        $lines = array(
+            sprintf( __( 'Some items in your order %s are unavailable.', 'lp-missing' ), $this->object->get_order_number() ),
+            __( 'Please review your options using the secure link below.', 'lp-missing' ),
+            $this->placeholders['{magic_link}'],
+        );
+        return implode( "\n\n", $lines );
+    }
+}
+
+class LP_Missing_Product_Reminder_Email extends WC_Email {
+
+    protected $item_name = '';
+
+    public function __construct() {
+        $this->id             = 'lp_missing_customer_reminder';
+        $this->customer_email = true;
+        $this->title          = __( 'Missing items reminder', 'lp-missing' );
+        $this->description    = __( 'Reminder email prompting customers to resolve missing items.', 'lp-missing' );
+        $this->heading        = __( 'Reminder: action needed for your order', 'lp-missing' );
+        $this->subject        = __( 'Reminder: missing item options for order #{order_number}', 'lp-missing' );
+        $this->placeholders   = array(
+            '{order_number}' => '',
+            '{magic_link}'   => '',
+            '{item_name}'    => '',
+        );
+        parent::__construct();
+    }
+
+    public function trigger( $order_id, $item_id = 0 ) {
+        $order = wc_get_order( $order_id );
+        if ( ! $order || ! LP_Missing_Product_Handler::order_has_missing_items( $order ) ) {
+            return;
+        }
+        $item = $order->get_item( $item_id );
+        if ( ! $item ) {
+            return;
+        }
+        $this->object     = $order;
+        $this->recipient  = $order->get_billing_email();
+        $this->item_name  = $item->get_name();
+        $this->placeholders['{order_number}'] = $order->get_order_number();
+        $this->placeholders['{magic_link}']   = LP_Missing_Product_Handler::get_magic_link_for_order( $order );
+        $this->placeholders['{item_name}']    = $this->item_name;
+
+        if ( ! $this->is_enabled() || ! $this->get_recipient() ) {
+            return;
+        }
+
+        $this->send( $this->get_recipient(), $this->get_subject(), $this->get_content(), $this->get_headers(), $this->get_attachments() );
+    }
+
+    public function get_content_html() {
+        ob_start();
+        wc_get_template( 'emails/email-header.php', array( 'email_heading' => $this->get_heading(), 'email' => $this ) );
+        ?>
+        <p><?php printf( esc_html__( 'We still need your decision for %1$s on order %2$s.', 'lp-missing' ), esc_html( $this->placeholders['{item_name}'] ), esc_html( $this->object->get_order_number() ) ); ?></p>
+        <p><?php esc_html_e( 'Please review your options using the secure link below.', 'lp-missing' ); ?></p>
+        <p>
+            <a class="button" href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php esc_html_e( 'Review options', 'lp-missing' ); ?></a>
+        </p>
+        <p><?php esc_html_e( 'If the button does not work, copy and paste this link into your browser:', 'lp-missing' ); ?><br />
+            <a href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php echo esc_html( $this->placeholders['{magic_link}'] ); ?></a>
+        </p>
+        <?php
+        wc_get_template( 'emails/email-footer.php', array( 'email' => $this ) );
+        return ob_get_clean();
+    }
+
+    public function get_content_plain() {
+        $lines = array(
+            sprintf( __( 'We still need your decision for %1$s on order %2$s.', 'lp-missing' ), $this->placeholders['{item_name}'], $this->object->get_order_number() ),
+            __( 'Please review your options using the secure link below.', 'lp-missing' ),
+            $this->placeholders['{magic_link}'],
+        );
+        return implode( "\n\n", $lines );
+    }
+}
+
+LP_Missing_Product_Handler::init();
