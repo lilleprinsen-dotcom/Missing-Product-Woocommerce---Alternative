@@ -13,14 +13,15 @@ class LP_Missing_Product_Handler {
     const OPTION_ENABLE_STOCK = 'lp_missing_enable_stock_log';
     const OPTION_SECRET = 'lp_missing_secret';
     const OPTION_PORTAL_URL = 'lp_missing_portal_url';
+    const OPTION_SETTINGS = 'lp_missing_settings';
     const OPTION_ATTENTION_FLAG = '_lp_missing_needs_attention';
-    const REMINDER_DELAY_DAYS = 3;
-    const REMINDER_MAX_COUNT = 3;
-    const REMINDER_MAX_AGE_DAYS = 7;
+    const CLEANUP_HOOK = 'lp_missing_cleanup_order';
+    const CLEANUP_MIN_DAYS = 7;
     const AJAX_NONCE_ACTION = 'lp_missing_admin';
     const SHORTCODE = 'lp_missing_items';
 
     protected static $auto_email_sent = array();
+    protected static $settings = null;
 
     public static function init() {
         add_action( 'add_meta_boxes', array( __CLASS__, 'add_metabox' ) );
@@ -34,6 +35,9 @@ class LP_Missing_Product_Handler {
         add_shortcode( self::SHORTCODE, array( __CLASS__, 'render_shortcode' ) );
         add_action( 'lp_missing_item_updated', array( __CLASS__, 'handle_item_updated' ), 10, 4 );
         add_action( 'lp_missing_send_reminder', array( __CLASS__, 'handle_scheduled_reminder' ), 10, 2 );
+        add_action( 'admin_menu', array( __CLASS__, 'register_settings_page' ) );
+        add_action( 'admin_post_lp_missing_save_settings', array( __CLASS__, 'handle_settings_save' ) );
+        add_action( self::CLEANUP_HOOK, array( __CLASS__, 'handle_cleanup_order' ) );
     }
 
     public static function add_metabox() {
@@ -65,6 +69,7 @@ class LP_Missing_Product_Handler {
             'last_reminder_at'=> 0,
             'reminder_scheduled_for' => 0,
             'needs_attention' => false,
+            'resolved_at'     => 0,
         );
     }
 
@@ -88,8 +93,68 @@ class LP_Missing_Product_Handler {
         $data['last_reminder_at'] = absint( $data['last_reminder_at'] );
         $data['reminder_scheduled_for'] = absint( $data['reminder_scheduled_for'] );
         $data['needs_attention'] = (bool) $data['needs_attention'];
+        $data['resolved_at'] = absint( isset( $data['resolved_at'] ) ? $data['resolved_at'] : 0 );
 
         return $data;
+    }
+
+    protected static function get_default_settings() {
+        return array(
+            'enable_stock_lock'           => 'yes',
+            'enable_stock_notes'          => 'yes',
+            'reminder_delay_days'         => 3,
+            'reminder_max_count'          => 3,
+            'reminder_max_age_days'       => 7,
+            'cleanup_resolved_after_days' => 30,
+            'show_stock_preview'          => 'yes',
+            'portal_base_url'             => '',
+        );
+    }
+
+    protected static function sanitize_settings( $settings ) {
+        $defaults = self::get_default_settings();
+        $settings = is_array( $settings ) ? wp_parse_args( $settings, $defaults ) : $defaults;
+
+        $settings['enable_stock_lock']  = 'yes' === $settings['enable_stock_lock'] ? 'yes' : 'no';
+        $settings['enable_stock_notes'] = 'yes' === $settings['enable_stock_notes'] ? 'yes' : 'no';
+        $settings['show_stock_preview'] = 'yes' === $settings['show_stock_preview'] ? 'yes' : 'no';
+
+        $settings['reminder_delay_days']   = max( 1, absint( $settings['reminder_delay_days'] ) );
+        $settings['reminder_max_count']    = max( 1, absint( $settings['reminder_max_count'] ) );
+        $settings['reminder_max_age_days'] = max( 1, absint( $settings['reminder_max_age_days'] ) );
+
+        $settings['cleanup_resolved_after_days'] = max( self::CLEANUP_MIN_DAYS, absint( $settings['cleanup_resolved_after_days'] ) );
+
+        $settings['portal_base_url'] = esc_url_raw( trim( $settings['portal_base_url'] ) );
+
+        return $settings;
+    }
+
+    protected static function get_settings( $force = false ) {
+        if ( is_array( self::$settings ) && ! $force ) {
+            return self::$settings;
+        }
+
+        $raw = get_option( self::OPTION_SETTINGS, array() );
+
+        if ( empty( $raw['enable_stock_lock'] ) ) {
+            $raw['enable_stock_lock'] = get_option( self::OPTION_ENABLE_STOCK, 'yes' );
+        }
+        if ( empty( $raw['portal_base_url'] ) ) {
+            $raw['portal_base_url'] = get_option( self::OPTION_PORTAL_URL, '' );
+        }
+
+        self::$settings = self::sanitize_settings( $raw );
+
+        return self::$settings;
+    }
+
+    protected static function update_settings( $settings ) {
+        $sanitized = self::sanitize_settings( $settings );
+        update_option( self::OPTION_SETTINGS, $sanitized, false );
+        update_option( self::OPTION_ENABLE_STOCK, $sanitized['enable_stock_lock'], false );
+        update_option( self::OPTION_PORTAL_URL, $sanitized['portal_base_url'], false );
+        self::$settings = $sanitized;
     }
 
     public static function render_metabox( $post ) {
@@ -197,9 +262,13 @@ class LP_Missing_Product_Handler {
             if(resp && resp.success && resp.data){
                 var d=resp.data;
                 var text=(d.thumbnail?"<img src='"+d.thumbnail+"' style=\"width:20px;height:20px;object-fit:cover;margin-right:4px;vertical-align:middle;\" />":"");
-                text+='<span>'+d.title+' | '+(d.sku?'SKU: '+d.sku+' | ':'')+(d.in_stock?'In stock':'Out of stock');
-                if(null!==d.stock_quantity){text+=' ('+d.stock_quantity+')';}
-                text+='</span>';
+                var stockText='';
+                if(lpMissingAdmin.showStock && null!==d.in_stock){
+                    stockText = (d.in_stock?'In stock':'Out of stock');
+                    if(null!==d.stock_quantity){stockText+=' ('+d.stock_quantity+')';}
+                    stockText = ' | '+stockText;
+                }
+                text+='<span>'+d.title+' | '+(d.sku?'SKU: '+d.sku+' | ':'')+stockText+'</span>';
                 $el.html(text);
             }
         });
@@ -239,6 +308,7 @@ JS;
         wp_localize_script( 'lp-missing-admin', 'lpMissingAdmin', array(
             'nonce'        => wp_create_nonce( self::AJAX_NONCE_ACTION ),
             'removeLabel'  => esc_html__( 'Remove', 'lp-missing' ),
+            'showStock'    => 'yes' === self::get_settings()['show_stock_preview'],
         ) );
         wp_enqueue_script( 'lp-missing-admin' );
     }
@@ -260,7 +330,8 @@ JS;
     }
 
     protected static function stock_lock_enabled() {
-        $enabled = get_option( self::OPTION_ENABLE_STOCK, 'yes' );
+        $settings = self::get_settings();
+        $enabled  = isset( $settings['enable_stock_lock'] ) ? $settings['enable_stock_lock'] : 'yes';
         return apply_filters( 'lp_missing_enable_stock_log', 'yes' === $enabled );
     }
 
@@ -290,7 +361,8 @@ JS;
     }
 
     protected static function get_portal_base_url() {
-        $configured = trim( (string) get_option( self::OPTION_PORTAL_URL, '' ) );
+        $settings = self::get_settings();
+        $configured = trim( (string) ( isset( $settings['portal_base_url'] ) ? $settings['portal_base_url'] : '' ) );
         $base_url  = $configured ? $configured : wc_get_page_permalink( 'myaccount' );
         if ( ! $base_url ) {
             $base_url = home_url( '/' );
@@ -406,6 +478,121 @@ JS;
         }
     }
 
+    public static function register_settings_page() {
+        add_submenu_page(
+            'woocommerce',
+            __( 'Missing Items Settings', 'lp-missing' ),
+            __( 'Missing Items Settings', 'lp-missing' ),
+            'manage_woocommerce',
+            'lp-missing-settings',
+            array( __CLASS__, 'render_settings_page' )
+        );
+    }
+
+    public static function handle_settings_save() {
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_die( esc_html__( 'You do not have permission to manage these settings.', 'lp-missing' ) );
+        }
+        check_admin_referer( 'lp_missing_settings' );
+
+        $settings = array(
+            'enable_stock_lock'           => ! empty( $_POST['lp_enable_stock_lock'] ) ? 'yes' : 'no',
+            'enable_stock_notes'          => ! empty( $_POST['lp_enable_stock_notes'] ) ? 'yes' : 'no',
+            'reminder_delay_days'         => isset( $_POST['lp_reminder_delay_days'] ) ? absint( $_POST['lp_reminder_delay_days'] ) : 3,
+            'reminder_max_count'          => isset( $_POST['lp_reminder_max_count'] ) ? absint( $_POST['lp_reminder_max_count'] ) : 3,
+            'reminder_max_age_days'       => isset( $_POST['lp_reminder_max_age_days'] ) ? absint( $_POST['lp_reminder_max_age_days'] ) : 7,
+            'cleanup_resolved_after_days' => isset( $_POST['lp_cleanup_resolved_after_days'] ) ? absint( $_POST['lp_cleanup_resolved_after_days'] ) : 30,
+            'show_stock_preview'          => ! empty( $_POST['lp_show_stock_preview'] ) ? 'yes' : 'no',
+            'portal_base_url'             => isset( $_POST['lp_portal_base_url'] ) ? sanitize_text_field( wp_unslash( $_POST['lp_portal_base_url'] ) ) : '',
+        );
+
+        self::update_settings( $settings );
+
+        wp_safe_redirect( add_query_arg( 'updated', 'true', admin_url( 'admin.php?page=lp-missing-settings' ) ) );
+        exit;
+    }
+
+    public static function render_settings_page() {
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            return;
+        }
+
+        $settings = self::get_settings();
+        ?>
+        <div class="wrap">
+            <h1><?php esc_html_e( 'Missing Items Settings', 'lp-missing' ); ?></h1>
+            <?php if ( isset( $_GET['updated'] ) ) : ?>
+                <div class="updated notice is-dismissible"><p><?php esc_html_e( 'Settings saved.', 'lp-missing' ); ?></p></div>
+            <?php endif; ?>
+            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                <?php wp_nonce_field( 'lp_missing_settings' ); ?>
+                <input type="hidden" name="action" value="lp_missing_save_settings" />
+                <table class="form-table" role="presentation">
+                    <tbody>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Lock stock for missing quantities', 'lp-missing' ); ?></th>
+                            <td>
+                                <label><input type="checkbox" name="lp_enable_stock_lock" value="1" <?php checked( 'yes', $settings['enable_stock_lock'] ); ?> /> <?php esc_html_e( 'Adjust inventory when items are marked missing.', 'lp-missing' ); ?></label>
+                                <p class="description"><?php esc_html_e( 'Disabling this will stop automatic stock decreases/increases for missing lines.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Add inventory history notes', 'lp-missing' ); ?></th>
+                            <td>
+                                <label><input type="checkbox" name="lp_enable_stock_notes" value="1" <?php checked( 'yes', $settings['enable_stock_notes'] ); ?> /> <?php esc_html_e( 'Write order notes when stock is adjusted.', 'lp-missing' ); ?></label>
+                                <p class="description"><?php esc_html_e( 'Keep inventory audit trails concise by disabling stock adjustment notes if needed.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Reminder spacing (days)', 'lp-missing' ); ?></th>
+                            <td>
+                                <input type="number" min="1" name="lp_reminder_delay_days" value="<?php echo esc_attr( $settings['reminder_delay_days'] ); ?>" />
+                                <p class="description"><?php esc_html_e( 'Controls how soon the first and subsequent reminders are sent after an item is marked missing.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Maximum reminders before escalation', 'lp-missing' ); ?></th>
+                            <td>
+                                <input type="number" min="1" name="lp_reminder_max_count" value="<?php echo esc_attr( $settings['reminder_max_count'] ); ?>" />
+                                <p class="description"><?php esc_html_e( 'After this many reminders, the line will be flagged for manual follow-up.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Maximum age before escalation (days)', 'lp-missing' ); ?></th>
+                            <td>
+                                <input type="number" min="1" name="lp_reminder_max_age_days" value="<?php echo esc_attr( $settings['reminder_max_age_days'] ); ?>" />
+                                <p class="description"><?php esc_html_e( 'If a line stays missing longer than this, it will be escalated even if reminder limits are not reached.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Cleanup resolved records after (days)', 'lp-missing' ); ?></th>
+                            <td>
+                                <input type="number" min="<?php echo esc_attr( self::CLEANUP_MIN_DAYS ); ?>" name="lp_cleanup_resolved_after_days" value="<?php echo esc_attr( $settings['cleanup_resolved_after_days'] ); ?>" />
+                                <p class="description"><?php printf( esc_html__( 'Resolved missing-item data will be removed after this many days (minimum %d days).', 'lp-missing' ), self::CLEANUP_MIN_DAYS ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Show stock in alternative previews', 'lp-missing' ); ?></th>
+                            <td>
+                                <label><input type="checkbox" name="lp_show_stock_preview" value="1" <?php checked( 'yes', $settings['show_stock_preview'] ); ?> /> <?php esc_html_e( 'Display stock quantities and availability for suggested alternatives.', 'lp-missing' ); ?></label>
+                                <p class="description"><?php esc_html_e( 'Disable to simplify the metabox for teams that do not need stock hints when picking alternatives.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Customer portal base URL', 'lp-missing' ); ?></th>
+                            <td>
+                                <input type="url" class="regular-text" name="lp_portal_base_url" value="<?php echo esc_attr( $settings['portal_base_url'] ); ?>" placeholder="<?php echo esc_attr( wc_get_page_permalink( 'myaccount' ) ); ?>" />
+                                <p class="description"><?php esc_html_e( 'Magic links in customer emails will point here. Leave blank to default to the My Account page.', 'lp-missing' ); ?></p>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <?php submit_button( __( 'Save settings', 'lp-missing' ) ); ?>
+            </form>
+        </div>
+        <?php
+    }
+
     public static function register_email_class( $emails ) {
         $emails['lp_missing_customer_email'] = new LP_Missing_Product_Email();
         $emails['lp_missing_customer_reminder'] = new LP_Missing_Product_Reminder_Email();
@@ -457,6 +644,7 @@ JS;
                 $new_data['last_reminder_at'] = 0;
                 $new_data['reminder_scheduled_for'] = 0;
                 $new_data['needs_attention'] = false;
+                $new_data['resolved_at'] = 0;
             }
 
             if ( ! $missing ) {
@@ -468,6 +656,9 @@ JS;
                 $new_data['last_reminder_at'] = 0;
                 $new_data['reminder_scheduled_for'] = 0;
                 $new_data['needs_attention'] = false;
+                $new_data['resolved_at'] = time();
+            } elseif ( ! self::is_line_resolved( $new_data ) ) {
+                $new_data['resolved_at'] = 0;
             }
 
             $new_data['reminder_scheduled_for'] = $missing ? $new_data['reminder_scheduled_for'] : 0;
@@ -504,12 +695,19 @@ JS;
             return;
         }
 
+        $settings   = self::get_settings();
+        $add_notes  = 'yes' === $settings['enable_stock_notes'];
+
         if ( $delta > 0 ) {
             wc_update_product_stock( $product, $delta, 'decrease' );
-            $order->add_order_note( sprintf( __( 'Inventory decreased by %1$s for product %2$s. Reason: Missing-item stock lock delta.', 'lp-missing' ), $delta, $product->get_name() ) );
+            if ( $add_notes ) {
+                $order->add_order_note( sprintf( __( 'Inventory decreased by %1$s for product %2$s. Reason: Missing-item stock lock delta.', 'lp-missing' ), $delta, $product->get_name() ) );
+            }
         } else {
             wc_update_product_stock( $product, abs( $delta ), 'increase' );
-            $order->add_order_note( sprintf( __( 'Inventory increased by %1$s for product %2$s. Reason: Missing-item stock lock delta.', 'lp-missing' ), abs( $delta ), $product->get_name() ) );
+            if ( $add_notes ) {
+                $order->add_order_note( sprintf( __( 'Inventory increased by %1$s for product %2$s. Reason: Missing-item stock lock delta.', 'lp-missing' ), abs( $delta ), $product->get_name() ) );
+            }
         }
         $new_data['stock_locked_qty'] = $new_lock;
     }
@@ -533,9 +731,10 @@ JS;
             return;
         }
 
-        $delay_days = is_null( $delay_days ) ? self::REMINDER_DELAY_DAYS : absint( $delay_days );
+        $settings = self::get_settings();
+        $delay_days = is_null( $delay_days ) ? $settings['reminder_delay_days'] : absint( $delay_days );
         if ( $delay_days < 1 ) {
-            $delay_days = self::REMINDER_DELAY_DAYS;
+            $delay_days = $settings['reminder_delay_days'];
         }
 
         while ( $scheduled = wp_next_scheduled( 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) ) ) {
@@ -571,6 +770,50 @@ JS;
         }
     }
 
+    protected static function schedule_cleanup_for_order( $order ) {
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+
+        $settings  = self::get_settings();
+        $threshold = max( self::CLEANUP_MIN_DAYS, absint( $settings['cleanup_resolved_after_days'] ) ) * DAY_IN_SECONDS;
+        $items     = $order->get_items( 'line_item' );
+        $next_time = 0;
+
+        foreach ( $items as $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! self::is_line_resolved( $data ) ) {
+                continue;
+            }
+            $resolved_at = ! empty( $data['resolved_at'] ) ? $data['resolved_at'] : ( $data['last_updated'] ? $data['last_updated'] : time() );
+            $candidate   = $resolved_at + $threshold;
+            if ( 0 === $next_time || $candidate < $next_time ) {
+                $next_time = $candidate;
+            }
+        }
+
+        $existing = wp_next_scheduled( self::CLEANUP_HOOK, array( $order->get_id() ) );
+
+        if ( ! $next_time ) {
+            while ( $existing ) {
+                wp_unschedule_event( $existing, self::CLEANUP_HOOK, array( $order->get_id() ) );
+                $existing = wp_next_scheduled( self::CLEANUP_HOOK, array( $order->get_id() ) );
+            }
+            return;
+        }
+
+        if ( $existing && $existing <= $next_time ) {
+            return;
+        }
+
+        if ( $existing ) {
+            wp_unschedule_event( $existing, self::CLEANUP_HOOK, array( $order->get_id() ) );
+        }
+
+        wp_schedule_single_event( $next_time, self::CLEANUP_HOOK, array( $order->get_id() ) );
+    }
+
     protected static function refresh_order_attention_flag( $order ) {
         if ( ! $order instanceof WC_Order ) {
             return;
@@ -603,6 +846,7 @@ JS;
 
         $new_missing = ! empty( $new_data['missing'] );
         $was_missing = ! empty( $old_data['missing'] );
+        $resolved    = self::is_line_resolved( $new_data );
 
         if ( $new_missing && empty( $new_data['first_missing_at'] ) ) {
             $new_data['first_missing_at'] = time();
@@ -619,9 +863,22 @@ JS;
             return;
         }
 
-        if ( self::is_line_resolved( $new_data ) ) {
+        if ( $resolved ) {
+            if ( empty( $new_data['resolved_at'] ) ) {
+                $new_data['resolved_at'] = time();
+                $item->update_meta_data( self::META_KEY, $new_data );
+                $item->save();
+            }
             self::cancel_reminder_for_item( $order, $item_id );
             self::refresh_order_attention_flag( $order );
+            self::schedule_cleanup_for_order( $order );
+            return;
+        }
+
+        if ( ! $resolved && ! empty( $new_data['resolved_at'] ) ) {
+            $new_data['resolved_at'] = 0;
+            $item->update_meta_data( self::META_KEY, $new_data );
+            $item->save();
         }
     }
 
@@ -666,7 +923,8 @@ JS;
         }
 
         $age_days = $data['first_missing_at'] ? floor( ( time() - $data['first_missing_at'] ) / DAY_IN_SECONDS ) : 0;
-        if ( $data['reminder_count'] >= self::REMINDER_MAX_COUNT || $age_days >= self::REMINDER_MAX_AGE_DAYS ) {
+        $settings = self::get_settings();
+        if ( $data['reminder_count'] >= $settings['reminder_max_count'] || $age_days >= $settings['reminder_max_age_days'] ) {
             if ( empty( $data['needs_attention'] ) ) {
                 $note = sprintf(
                     __( 'Manual follow-up needed: Item %1$s has %2$d reminder(s) over %3$d day(s).', 'lp-missing' ),
@@ -685,6 +943,54 @@ JS;
         }
 
         self::schedule_reminder_for_item( $order, $item_id );
+    }
+
+    public static function handle_cleanup_order( $order_id ) {
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            return;
+        }
+
+        $settings  = self::get_settings();
+        $threshold = max( self::CLEANUP_MIN_DAYS, absint( $settings['cleanup_resolved_after_days'] ) ) * DAY_IN_SECONDS;
+        $items     = $order->get_items( 'line_item' );
+        $next_time = 0;
+        $changed   = false;
+
+        foreach ( $items as $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! self::is_line_resolved( $data ) ) {
+                continue;
+            }
+
+            $resolved_at = ! empty( $data['resolved_at'] ) ? $data['resolved_at'] : ( $data['last_updated'] ? $data['last_updated'] : time() );
+            $age         = time() - $resolved_at;
+
+            if ( $age >= $threshold ) {
+                $item->delete_meta_data( self::META_KEY );
+                $item->save();
+                $changed = true;
+                continue;
+            }
+
+            $candidate = $resolved_at + $threshold;
+            if ( 0 === $next_time || $candidate < $next_time ) {
+                $next_time = $candidate;
+            }
+        }
+
+        if ( $changed ) {
+            self::refresh_order_attention_flag( $order );
+        }
+
+        if ( $next_time ) {
+            $existing = wp_next_scheduled( self::CLEANUP_HOOK, array( $order->get_id() ) );
+            if ( $existing && $existing > $next_time ) {
+                wp_unschedule_event( $existing, self::CLEANUP_HOOK, array( $order->get_id() ) );
+            }
+        }
+
+        self::schedule_cleanup_for_order( $order );
     }
 
     public static function ajax_search_products() {
@@ -746,12 +1052,15 @@ JS;
         if ( ! $product ) {
             wp_send_json_error();
         }
+        $settings = self::get_settings();
+        $include_stock = 'yes' === $settings['show_stock_preview'];
+
         $data = array(
             'id'             => $product->get_id(),
             'title'          => $product->get_name(),
             'sku'            => $product->get_sku(),
-            'in_stock'       => $product->is_in_stock(),
-            'stock_quantity' => $product->managing_stock() ? $product->get_stock_quantity() : null,
+            'in_stock'       => $include_stock ? $product->is_in_stock() : null,
+            'stock_quantity' => ( $include_stock && $product->managing_stock() ) ? $product->get_stock_quantity() : null,
             'thumbnail'      => wp_get_attachment_image_url( $product->get_image_id(), 'thumbnail' ),
         );
         wp_send_json_success( $data );
@@ -881,6 +1190,11 @@ JS;
         if ( in_array( $new['status'], array( 'alt_accepted', 'delete_accepted' ), true ) ) {
             $new['needs_attention'] = false;
             $new['reminder_scheduled_for'] = 0;
+            $new['resolved_at'] = time();
+        }
+
+        if ( ! self::is_line_resolved( $new ) ) {
+            $new['resolved_at'] = 0;
         }
 
         if ( serialize( $existing ) !== serialize( $new ) ) {
