@@ -8,16 +8,11 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-// Bail out early when WooCommerce is not available to prevent fatal errors.
-if ( ! class_exists( 'WooCommerce' ) || ! class_exists( 'WC_Email' ) ) {
-    add_action(
-        'admin_notices',
-        function() {
-            echo '<div class="notice notice-error"><p>' . esc_html__( 'Missing Product WooCommerce Alternative requires WooCommerce to be active.', 'lp-missing' ) . '</p></div>';
-        }
-    );
-
-    return;
+/**
+ * Display an admin notice when WooCommerce dependencies are missing.
+ */
+function lp_missing_show_wc_notice() {
+    echo '<div class="notice notice-error"><p>' . esc_html__( 'Missing Product WooCommerce Alternative requires WooCommerce to be active.', 'lp-missing' ) . '</p></div>';
 }
 
 class LP_Missing_Product_Handler {
@@ -2092,4 +2087,20 @@ class LP_Missing_Product_Reminder_Email extends WC_Email {
     }
 }
 
-LP_Missing_Product_Handler::init();
+/**
+ * Bootstrap the plugin only after WooCommerce finished loading.
+ *
+ * This avoids false "requires WooCommerce" notices that can occur when
+ * this plugin is loaded before WooCommerce classes are available.
+ */
+function lp_missing_bootstrap() {
+    if ( ! class_exists( 'WooCommerce' ) || ! class_exists( 'WC_Email' ) || ! function_exists( 'wc_get_product' ) ) {
+        add_action( 'admin_notices', 'lp_missing_show_wc_notice' );
+
+        return;
+    }
+
+    LP_Missing_Product_Handler::init();
+}
+
+add_action( 'plugins_loaded', 'lp_missing_bootstrap', 20 );
