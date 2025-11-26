@@ -8,6 +8,18 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+// Bail out early when WooCommerce is not available to prevent fatal errors.
+if ( ! class_exists( 'WooCommerce' ) || ! class_exists( 'WC_Email' ) ) {
+    add_action(
+        'admin_notices',
+        function() {
+            echo '<div class="notice notice-error"><p>' . esc_html__( 'Missing Product WooCommerce Alternative requires WooCommerce to be active.', 'lp-missing' ) . '</p></div>';
+        }
+    );
+
+    return;
+}
+
 class LP_Missing_Product_Handler {
     const META_KEY = '_lp_missing_data';
     const OPTION_ENABLE_STOCK = 'lp_missing_enable_stock_log';
