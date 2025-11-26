@@ -8,17 +8,33 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-// Bail out early when WooCommerce is not available to prevent fatal errors.
-if ( ! class_exists( 'WooCommerce' ) || ! class_exists( 'WC_Email' ) ) {
-    add_action(
-        'admin_notices',
-        function() {
-            echo '<div class="notice notice-error"><p>' . esc_html__( 'Missing Product WooCommerce Alternative requires WooCommerce to be active.', 'lp-missing' ) . '</p></div>';
+add_action(
+    'before_woocommerce_init',
+    function() {
+        if ( class_exists( '\Automattic\WooCommerce\Utilities\FeaturesUtil' ) ) {
+            \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
         }
-    );
+    },
+    0
+);
 
-    return;
-}
+if ( ! function_exists( 'lp_missing_bootstrap_plugin' ) ) {
+    function lp_missing_bootstrap_plugin() {
+        if ( class_exists( 'LP_Missing_Product_Handler' ) ) {
+            return;
+        }
+
+        // Bail out early when WooCommerce is not available to prevent fatal errors.
+        if ( ! class_exists( 'WooCommerce' ) || ! class_exists( 'WC_Email' ) ) {
+            add_action(
+                'admin_notices',
+                function() {
+                    echo '<div class="notice notice-error"><p>' . esc_html__( 'Missing Product WooCommerce Alternative requires WooCommerce to be active.', 'lp-missing' ) . '</p></div>';
+                }
+            );
+
+            return;
+        }
 
 class LP_Missing_Product_Handler {
     const META_KEY = '_lp_missing_data';
@@ -2093,3 +2109,8 @@ class LP_Missing_Product_Reminder_Email extends WC_Email {
 }
 
 LP_Missing_Product_Handler::init();
+
+    }
+}
+
+add_action( 'plugins_loaded', 'lp_missing_bootstrap_plugin', 20 );
