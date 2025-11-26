@@ -13,8 +13,14 @@ class LP_Missing_Product_Handler {
     const OPTION_ENABLE_STOCK = 'lp_missing_enable_stock_log';
     const OPTION_SECRET = 'lp_missing_secret';
     const OPTION_PORTAL_URL = 'lp_missing_portal_url';
+    const OPTION_ATTENTION_FLAG = '_lp_missing_needs_attention';
+    const REMINDER_DELAY_DAYS = 3;
+    const REMINDER_MAX_COUNT = 3;
+    const REMINDER_MAX_AGE_DAYS = 7;
     const AJAX_NONCE_ACTION = 'lp_missing_admin';
     const SHORTCODE = 'lp_missing_items';
+
+    protected static $auto_email_sent = array();
 
     public static function init() {
         add_action( 'add_meta_boxes', array( __CLASS__, 'add_metabox' ) );
@@ -26,6 +32,8 @@ class LP_Missing_Product_Handler {
         add_action( 'admin_notices', array( __CLASS__, 'admin_notices' ) );
         add_filter( 'woocommerce_email_classes', array( __CLASS__, 'register_email_class' ) );
         add_shortcode( self::SHORTCODE, array( __CLASS__, 'render_shortcode' ) );
+        add_action( 'lp_missing_item_updated', array( __CLASS__, 'handle_item_updated' ), 10, 4 );
+        add_action( 'lp_missing_send_reminder', array( __CLASS__, 'handle_scheduled_reminder' ), 10, 2 );
     }
 
     public static function add_metabox() {
@@ -52,6 +60,11 @@ class LP_Missing_Product_Handler {
             'qty_alt'         => 0,
             'stock_locked_qty'=> 0,
             'last_updated'    => 0,
+            'first_missing_at'=> 0,
+            'reminder_count'  => 0,
+            'last_reminder_at'=> 0,
+            'reminder_scheduled_for' => 0,
+            'needs_attention' => false,
         );
     }
 
@@ -70,6 +83,11 @@ class LP_Missing_Product_Handler {
         $data['qty_alt'] = absint( $data['qty_alt'] );
         $data['stock_locked_qty'] = absint( $data['stock_locked_qty'] );
         $data['last_updated'] = absint( $data['last_updated'] );
+        $data['first_missing_at'] = absint( $data['first_missing_at'] );
+        $data['reminder_count'] = absint( $data['reminder_count'] );
+        $data['last_reminder_at'] = absint( $data['last_reminder_at'] );
+        $data['reminder_scheduled_for'] = absint( $data['reminder_scheduled_for'] );
+        $data['needs_attention'] = (bool) $data['needs_attention'];
 
         return $data;
     }
@@ -297,7 +315,7 @@ JS;
         }
         foreach ( $order->get_items( 'line_item' ) as $item ) {
             $data = self::get_item_data( $item );
-            if ( ! empty( $data['missing'] ) ) {
+            if ( ! empty( $data['missing'] ) && ! self::is_line_resolved( $data ) ) {
                 return true;
             }
         }
@@ -317,6 +335,22 @@ JS;
             return false;
         }
         $emails['lp_missing_customer_email']->trigger( $order->get_id() );
+        return true;
+    }
+
+    protected static function send_reminder_email( $order, $item_id ) {
+        if ( ! $order instanceof WC_Order || ! self::order_has_missing_items( $order ) ) {
+            return false;
+        }
+        $mailer = WC()->mailer();
+        if ( ! $mailer ) {
+            return false;
+        }
+        $emails = $mailer->get_emails();
+        if ( empty( $emails['lp_missing_customer_reminder'] ) ) {
+            return false;
+        }
+        $emails['lp_missing_customer_reminder']->trigger( $order->get_id(), $item_id );
         return true;
     }
 
@@ -374,6 +408,7 @@ JS;
 
     public static function register_email_class( $emails ) {
         $emails['lp_missing_customer_email'] = new LP_Missing_Product_Email();
+        $emails['lp_missing_customer_reminder'] = new LP_Missing_Product_Reminder_Email();
         return $emails;
     }
 
@@ -405,6 +440,8 @@ JS;
             $internal_notes = isset( $posted['internal_notes'] ) ? wp_kses_post( wp_unslash( $posted['internal_notes'] ) ) : '';
             $alt_ids = isset( $posted['alternatives'] ) ? self::sanitize_alt_ids( wp_unslash( $posted['alternatives'] ) ) : array();
 
+            $was_missing = ! empty( $existing['missing'] );
+
             $new_data = $existing;
             $new_data['missing'] = $missing;
             $new_data['propose_delete'] = $missing && $propose_delete;
@@ -412,13 +449,28 @@ JS;
             $new_data['notes'] = $missing ? $notes : '';
             $new_data['internal_notes'] = $missing ? $internal_notes : '';
             $new_data['alternatives'] = $missing ? $alt_ids : array();
+            $new_data['last_updated'] = time();
+
+            if ( $missing && ! $was_missing ) {
+                $new_data['first_missing_at'] = time();
+                $new_data['reminder_count'] = 0;
+                $new_data['last_reminder_at'] = 0;
+                $new_data['reminder_scheduled_for'] = 0;
+                $new_data['needs_attention'] = false;
+            }
+
             if ( ! $missing ) {
                 $new_data['status'] = 'cleared';
                 $new_data['selected_alt_id'] = 0;
                 $new_data['qty_alt'] = 0;
+                $new_data['first_missing_at'] = 0;
+                $new_data['reminder_count'] = 0;
+                $new_data['last_reminder_at'] = 0;
+                $new_data['reminder_scheduled_for'] = 0;
+                $new_data['needs_attention'] = false;
             }
 
-            $new_data['last_updated'] = time();
+            $new_data['reminder_scheduled_for'] = $missing ? $new_data['reminder_scheduled_for'] : 0;
 
             self::maybe_adjust_stock( $item, $existing, $new_data, $order );
 
@@ -460,6 +512,179 @@ JS;
             $order->add_order_note( sprintf( __( 'Inventory increased by %1$s for product %2$s. Reason: Missing-item stock lock delta.', 'lp-missing' ), abs( $delta ), $product->get_name() ) );
         }
         $new_data['stock_locked_qty'] = $new_lock;
+    }
+
+    protected static function is_line_resolved( $data ) {
+        $resolved_statuses = array( 'alt_accepted', 'delete_accepted', 'cleared' );
+        return empty( $data['missing'] ) || in_array( $data['status'], $resolved_statuses, true );
+    }
+
+    protected static function schedule_reminder_for_item( $order, $item_id, $delay_days = null ) {
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        $item = $order->get_item( $item_id );
+        if ( ! $item ) {
+            return;
+        }
+        $data = self::get_item_data( $item );
+        if ( self::is_line_resolved( $data ) ) {
+            return;
+        }
+
+        $delay_days = is_null( $delay_days ) ? self::REMINDER_DELAY_DAYS : absint( $delay_days );
+        if ( $delay_days < 1 ) {
+            $delay_days = self::REMINDER_DELAY_DAYS;
+        }
+
+        while ( $scheduled = wp_next_scheduled( 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) ) ) {
+            wp_unschedule_event( $scheduled, 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) );
+        }
+
+        $timestamp = time() + ( $delay_days * DAY_IN_SECONDS );
+        wp_schedule_single_event( $timestamp, 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) );
+
+        $data['reminder_scheduled_for'] = $timestamp;
+        if ( empty( $data['first_missing_at'] ) ) {
+            $data['first_missing_at'] = time();
+        }
+        $item->update_meta_data( self::META_KEY, $data );
+        $item->save();
+    }
+
+    protected static function cancel_reminder_for_item( $order, $item_id ) {
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        while ( $scheduled = wp_next_scheduled( 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) ) ) {
+            wp_unschedule_event( $scheduled, 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) );
+        }
+        $item = $order->get_item( $item_id );
+        if ( $item ) {
+            $data = self::get_item_data( $item );
+            $data['reminder_scheduled_for'] = 0;
+            $data['needs_attention'] = false;
+            $item->update_meta_data( self::META_KEY, $data );
+            $item->save();
+        }
+    }
+
+    protected static function refresh_order_attention_flag( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        $needs_attention = false;
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            $data = self::get_item_data( $item );
+            if ( ! empty( $data['needs_attention'] ) ) {
+                $needs_attention = true;
+                break;
+            }
+        }
+        if ( $needs_attention ) {
+            $order->update_meta_data( self::OPTION_ATTENTION_FLAG, 'yes' );
+        } else {
+            $order->delete_meta_data( self::OPTION_ATTENTION_FLAG );
+        }
+        $order->save();
+    }
+
+    public static function handle_item_updated( $order, $item_id, $new_data, $old_data ) {
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+
+        $item = $order->get_item( $item_id );
+        if ( ! $item ) {
+            return;
+        }
+
+        $new_missing = ! empty( $new_data['missing'] );
+        $was_missing = ! empty( $old_data['missing'] );
+
+        if ( $new_missing && empty( $new_data['first_missing_at'] ) ) {
+            $new_data['first_missing_at'] = time();
+            $item->update_meta_data( self::META_KEY, $new_data );
+            $item->save();
+        }
+
+        if ( $new_missing && ! $was_missing ) {
+            if ( self::order_has_missing_items( $order ) && empty( self::$auto_email_sent[ $order->get_id() ] ) ) {
+                self::send_customer_email( $order );
+                self::$auto_email_sent[ $order->get_id() ] = true;
+            }
+            self::schedule_reminder_for_item( $order, $item_id );
+            return;
+        }
+
+        if ( self::is_line_resolved( $new_data ) ) {
+            self::cancel_reminder_for_item( $order, $item_id );
+            self::refresh_order_attention_flag( $order );
+        }
+    }
+
+    public static function handle_scheduled_reminder( $order_id, $item_id ) {
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            return;
+        }
+        $item = $order->get_item( $item_id );
+        if ( ! $item ) {
+            return;
+        }
+        $data = self::get_item_data( $item );
+
+        if ( self::is_line_resolved( $data ) ) {
+            self::cancel_reminder_for_item( $order, $item_id );
+            self::refresh_order_attention_flag( $order );
+            return;
+        }
+
+        if ( empty( $data['missing'] ) ) {
+            self::cancel_reminder_for_item( $order, $item_id );
+            self::refresh_order_attention_flag( $order );
+            return;
+        }
+
+        $sent = self::send_reminder_email( $order, $item_id );
+
+        $data['first_missing_at'] = $data['first_missing_at'] ? $data['first_missing_at'] : time();
+        if ( $sent ) {
+            $data['reminder_count'] = $data['reminder_count'] + 1;
+            $data['last_reminder_at'] = time();
+        }
+        $data['reminder_scheduled_for'] = 0;
+
+        $item->update_meta_data( self::META_KEY, $data );
+        $item->save();
+
+        if ( ! $sent ) {
+            self::schedule_reminder_for_item( $order, $item_id );
+            return;
+        }
+
+        $age_days = $data['first_missing_at'] ? floor( ( time() - $data['first_missing_at'] ) / DAY_IN_SECONDS ) : 0;
+        if ( $data['reminder_count'] >= self::REMINDER_MAX_COUNT || $age_days >= self::REMINDER_MAX_AGE_DAYS ) {
+            if ( empty( $data['needs_attention'] ) ) {
+                $note = sprintf(
+                    __( 'Manual follow-up needed: Item %1$s has %2$d reminder(s) over %3$d day(s).', 'lp-missing' ),
+                    $item->get_name(),
+                    $data['reminder_count'],
+                    max( 0, $age_days )
+                );
+                $order->add_order_note( $note );
+            }
+            $data['needs_attention'] = true;
+            $item->update_meta_data( self::META_KEY, $data );
+            $item->save();
+            $order->update_meta_data( self::OPTION_ATTENTION_FLAG, 'yes' );
+            $order->save();
+            return;
+        }
+
+        self::schedule_reminder_for_item( $order, $item_id );
     }
 
     public static function ajax_search_products() {
@@ -653,6 +878,11 @@ JS;
             return array( 'message' => __( 'Unknown action.', 'lp-missing' ), 'status' => 'error' );
         }
 
+        if ( in_array( $new['status'], array( 'alt_accepted', 'delete_accepted' ), true ) ) {
+            $new['needs_attention'] = false;
+            $new['reminder_scheduled_for'] = 0;
+        }
+
         if ( serialize( $existing ) !== serialize( $new ) ) {
             $item->update_meta_data( self::META_KEY, $new );
             $item->save();
@@ -710,7 +940,7 @@ JS;
         $alt_ids = array();
         foreach ( $items as $item_id => $item ) {
             $data = self::get_item_data( $item );
-            if ( ! empty( $data['missing'] ) ) {
+            if ( ! empty( $data['missing'] ) && ! self::is_line_resolved( $data ) ) {
                 $missing_items[ $item_id ] = array( 'item' => $item, 'data' => $data );
                 if ( ! empty( $data['alternatives'] ) ) {
                     $alt_ids = array_merge( $alt_ids, $data['alternatives'] );
@@ -856,6 +1086,75 @@ class LP_Missing_Product_Email extends WC_Email {
     public function get_content_plain() {
         $lines = array(
             sprintf( __( 'Some items in your order %s are unavailable.', 'lp-missing' ), $this->object->get_order_number() ),
+            __( 'Please review your options using the secure link below.', 'lp-missing' ),
+            $this->placeholders['{magic_link}'],
+        );
+        return implode( "\n\n", $lines );
+    }
+}
+
+class LP_Missing_Product_Reminder_Email extends WC_Email {
+
+    protected $item_name = '';
+
+    public function __construct() {
+        $this->id             = 'lp_missing_customer_reminder';
+        $this->customer_email = true;
+        $this->title          = __( 'Missing items reminder', 'lp-missing' );
+        $this->description    = __( 'Reminder email prompting customers to resolve missing items.', 'lp-missing' );
+        $this->heading        = __( 'Reminder: action needed for your order', 'lp-missing' );
+        $this->subject        = __( 'Reminder: missing item options for order #{order_number}', 'lp-missing' );
+        $this->placeholders   = array(
+            '{order_number}' => '',
+            '{magic_link}'   => '',
+            '{item_name}'    => '',
+        );
+        parent::__construct();
+    }
+
+    public function trigger( $order_id, $item_id = 0 ) {
+        $order = wc_get_order( $order_id );
+        if ( ! $order || ! LP_Missing_Product_Handler::order_has_missing_items( $order ) ) {
+            return;
+        }
+        $item = $order->get_item( $item_id );
+        if ( ! $item ) {
+            return;
+        }
+        $this->object     = $order;
+        $this->recipient  = $order->get_billing_email();
+        $this->item_name  = $item->get_name();
+        $this->placeholders['{order_number}'] = $order->get_order_number();
+        $this->placeholders['{magic_link}']   = LP_Missing_Product_Handler::get_magic_link_for_order( $order );
+        $this->placeholders['{item_name}']    = $this->item_name;
+
+        if ( ! $this->is_enabled() || ! $this->get_recipient() ) {
+            return;
+        }
+
+        $this->send( $this->get_recipient(), $this->get_subject(), $this->get_content(), $this->get_headers(), $this->get_attachments() );
+    }
+
+    public function get_content_html() {
+        ob_start();
+        wc_get_template( 'emails/email-header.php', array( 'email_heading' => $this->get_heading(), 'email' => $this ) );
+        ?>
+        <p><?php printf( esc_html__( 'We still need your decision for %1$s on order %2$s.', 'lp-missing' ), esc_html( $this->placeholders['{item_name}'] ), esc_html( $this->object->get_order_number() ) ); ?></p>
+        <p><?php esc_html_e( 'Please review your options using the secure link below.', 'lp-missing' ); ?></p>
+        <p>
+            <a class="button" href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php esc_html_e( 'Review options', 'lp-missing' ); ?></a>
+        </p>
+        <p><?php esc_html_e( 'If the button does not work, copy and paste this link into your browser:', 'lp-missing' ); ?><br />
+            <a href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php echo esc_html( $this->placeholders['{magic_link}'] ); ?></a>
+        </p>
+        <?php
+        wc_get_template( 'emails/email-footer.php', array( 'email' => $this ) );
+        return ob_get_clean();
+    }
+
+    public function get_content_plain() {
+        $lines = array(
+            sprintf( __( 'We still need your decision for %1$s on order %2$s.', 'lp-missing' ), $this->placeholders['{item_name}'], $this->object->get_order_number() ),
             __( 'Please review your options using the secure link below.', 'lp-missing' ),
             $this->placeholders['{magic_link}'],
         );
