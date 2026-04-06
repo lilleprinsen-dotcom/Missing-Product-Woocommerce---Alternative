@@ -713,8 +713,10 @@ JS;
             return array( 'status' => 'error', 'message' => __( 'Selected alternative is no longer available.', 'lp-missing' ) );
         }
 
-        $qty_alt = $data['qty_alt'] ? absint( $data['qty_alt'] ) : absint( $data['qty_missing'] );
-        $qty_alt = max( 1, min( $qty_alt, $item->get_quantity() ) );
+        $previous_missing_qty = absint( $data['qty_missing'] );
+        $qty_alt = $data['qty_alt'] ? absint( $data['qty_alt'] ) : $previous_missing_qty;
+        $qty_alt = max( 1, min( $qty_alt, $previous_missing_qty, absint( $item->get_quantity() ) ) );
+        $remaining_missing_qty = max( 0, $previous_missing_qty - $qty_alt );
 
         $settings             = self::get_settings();
         $price_handling_mode  = isset( $settings['alt_price_handling'] ) ? $settings['alt_price_handling'] : 'charge_customer';
@@ -727,13 +729,20 @@ JS;
         $delta_per_unit       = $alt_unit_incl - $original_unit_incl;
         $final_delta          = wc_format_decimal( $delta_per_unit * $qty_alt, wc_get_price_decimals() );
 
+        $line_result = '';
         if ( 'replace' === $mode ) {
             $new_qty = max( 0, $item->get_quantity() - $qty_alt );
             $item->set_quantity( $new_qty );
-            $item->save();
+            if ( $new_qty > 0 ) {
+                $item->save();
+                $line_result = __( 'original line quantity reduced', 'lp-missing' );
+            } else {
+                $line_result = __( 'original line removed', 'lp-missing' );
+            }
         } else {
             self::reduce_original_line_totals_for_added_alternative( $item, $qty_alt );
             $item->save();
+            $line_result = __( 'original line totals reduced', 'lp-missing' );
         }
 
         $alt_item_id = $order->add_product( $alt_product, $qty_alt );
@@ -752,27 +761,43 @@ JS;
         $surcharge_result = self::handle_price_difference_surcharge( $order, $final_delta, $original_name, $alt_product->get_name(), $qty_alt, $original_unit_incl, $alt_unit_incl, $price_handling_mode );
 
         $new_data = $data;
-        $new_data['status'] = 'alt_applied';
-        $new_data['missing'] = false;
-        $new_data['qty_missing'] = 0;
+        $fully_resolved = $remaining_missing_qty < 1;
+        $new_data['status'] = $fully_resolved ? 'alt_applied' : 'pending';
+        $new_data['missing'] = ! $fully_resolved;
+        $new_data['qty_missing'] = $remaining_missing_qty;
+        $new_data['selected_alt_id'] = 0;
+        $new_data['qty_alt'] = 0;
         $new_data['needs_attention'] = false;
         $new_data['reminder_scheduled_for'] = 0;
-        $new_data['resolved_at'] = time();
+        $new_data['decision_made_at'] = $fully_resolved ? time() : 0;
+        $new_data['resolved_at'] = $fully_resolved ? time() : 0;
         $new_data['last_updated'] = time();
         $new_data['stock_locked_qty'] = isset( $new_data['stock_locked_qty'] ) ? absint( $new_data['stock_locked_qty'] ) : 0;
 
         self::maybe_adjust_stock( $item, $data, $new_data, $order );
-        $item->update_meta_data( self::META_KEY, $new_data );
-        $item->save();
+        if ( $fully_resolved && 'replace' === $mode && isset( $new_qty ) && $new_qty < 1 ) {
+            $order->remove_item( $item_id );
+            $order->save();
+        } else {
+            $item->update_meta_data( self::META_KEY, $new_data );
+            $item->save();
+        }
         $order->calculate_totals( false );
 
         $note_parts   = array();
         $note_parts[] = sprintf( __( 'Applied customer-selected alternative %1$s (Qty %2$d).', 'lp-missing' ), $alt_product->get_name(), $qty_alt );
         $note_parts[] = sprintf( __( 'Mode: %s.', 'lp-missing' ), 'replace' === $mode ? __( 'Replace', 'lp-missing' ) : __( 'Add new line', 'lp-missing' ) );
         $note_parts[] = sprintf( __( 'Original product: %1$s. Alternative product: %2$s. Qty: %3$d.', 'lp-missing' ), $original_name, $alt_product->get_name(), $qty_alt );
+        $note_parts[] = sprintf( __( 'Missing qty before apply: %1$d. Applied qty: %2$d. Remaining unresolved qty: %3$d.', 'lp-missing' ), $previous_missing_qty, $qty_alt, $remaining_missing_qty );
+        $note_parts[] = sprintf( __( 'Line update result: %s.', 'lp-missing' ), $line_result );
         $note_parts[] = sprintf( __( 'Original unit amount used for comparison: %1$s. Alternative unit amount used for comparison: %2$s.', 'lp-missing' ), wc_price( $original_unit_incl, array( 'currency' => $order->get_currency() ) ), wc_price( $alt_unit_incl, array( 'currency' => $order->get_currency() ) ) );
         $note_parts[] = sprintf( __( 'Final delta: %s.', 'lp-missing' ), wc_price( $final_delta, array( 'currency' => $order->get_currency() ) ) );
         $note_parts[] = sprintf( __( 'Price handling: %s.', 'lp-missing' ), 'store_covers' === $surcharge_result['mode'] ? __( 'Store covers any extra cost', 'lp-missing' ) : __( 'Customer is charged delta via separate surcharge order when positive', 'lp-missing' ) );
+        if ( ! $fully_resolved ) {
+            $note_parts[] = __( 'Missing item remains open with remaining quantity awaiting new customer decision.', 'lp-missing' );
+        } else {
+            $note_parts[] = __( 'Missing item is fully resolved.', 'lp-missing' );
+        }
         if ( ! empty( $surcharge_result['summary_note'] ) ) {
             $note_parts[] = $surcharge_result['summary_note'];
         }
@@ -780,7 +805,7 @@ JS;
 
         do_action( 'lp_missing_item_updated', $order, $item_id, $new_data, $data );
 
-        return array( 'status' => 'success', 'message' => __( 'Alternative applied to the order.', 'lp-missing' ) );
+        return array( 'status' => 'success', 'message' => $fully_resolved ? __( 'Alternative applied to the order.', 'lp-missing' ) : __( 'Alternative partially applied. Remaining missing quantity is still open.', 'lp-missing' ) );
     }
 
     protected static function apply_delete_decision( $order, $item, $item_id, $data, $mode ) {
@@ -788,15 +813,24 @@ JS;
             return array( 'status' => 'error', 'message' => __( 'No customer-approved deletion to apply.', 'lp-missing' ) );
         }
 
-        $qty_remove = $data['qty_missing'] ? absint( $data['qty_missing'] ) : $item->get_quantity();
+        $previous_missing_qty = absint( $data['qty_missing'] );
+        $qty_remove = $previous_missing_qty ? $previous_missing_qty : $item->get_quantity();
         $qty_remove = max( 1, min( $qty_remove, $item->get_quantity() ) );
 
         $unit_price    = self::get_item_unit_price_incl_tax( $item );
+        $line_result   = __( 'line unchanged', 'lp-missing' );
 
-        $new_qty = max( 0, $item->get_quantity() - $qty_remove );
-        $item->set_quantity( $new_qty );
-        $item->save();
-        $order->calculate_totals( true );
+        if ( 'reduce' === $mode ) {
+            $new_qty = max( 0, $item->get_quantity() - $qty_remove );
+            $item->set_quantity( $new_qty );
+            if ( $new_qty > 0 ) {
+                $item->save();
+                $line_result = __( 'line quantity reduced', 'lp-missing' );
+            } else {
+                $line_result = __( 'line removed', 'lp-missing' );
+            }
+            $order->calculate_totals( true );
+        }
 
         if ( 'refund' === $mode ) {
             $refund_amount = wc_format_decimal( $unit_price * $qty_remove, wc_get_price_decimals() );
@@ -811,6 +845,7 @@ JS;
                     $order->add_order_note( sprintf( __( 'Refund could not be created for missing-item deletion: %s', 'lp-missing' ), $refund->get_error_message() ) );
                 }
             }
+            $line_result = __( 'refund created (line kept for accounting)', 'lp-missing' );
         }
 
         $new_data = $data;
@@ -824,10 +859,23 @@ JS;
         $new_data['stock_locked_qty'] = isset( $new_data['stock_locked_qty'] ) ? absint( $new_data['stock_locked_qty'] ) : 0;
 
         self::maybe_adjust_stock( $item, $data, $new_data, $order );
-        $item->update_meta_data( self::META_KEY, $new_data );
-        $item->save();
+        if ( 'reduce' === $mode && isset( $new_qty ) && $new_qty < 1 ) {
+            $order->remove_item( $item_id );
+            $order->save();
+        } else {
+            $item->update_meta_data( self::META_KEY, $new_data );
+            $item->save();
+        }
 
-        $note = sprintf( __( 'Applied customer-approved deletion for %1$s (Qty %2$d). Mode: %3$s.', 'lp-missing' ), $item->get_name(), $qty_remove, 'refund' === $mode ? __( 'Refund', 'lp-missing' ) : __( 'Remove from totals', 'lp-missing' ) );
+        $note = sprintf(
+            __( 'Applied customer-approved deletion for %1$s. Missing qty before apply: %2$d. Applied qty: %3$d. Remaining unresolved qty: %4$d. Mode: %5$s. Result: %6$s.', 'lp-missing' ),
+            $item->get_name(),
+            $previous_missing_qty,
+            $qty_remove,
+            0,
+            'refund' === $mode ? __( 'Refund', 'lp-missing' ) : __( 'Reduce order totals', 'lp-missing' ),
+            $line_result
+        );
         $order->add_order_note( $note );
 
         do_action( 'lp_missing_item_updated', $order, $item_id, $new_data, $data );
