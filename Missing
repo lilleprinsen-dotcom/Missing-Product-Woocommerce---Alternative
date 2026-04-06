@@ -716,24 +716,40 @@ JS;
         $qty_alt = $data['qty_alt'] ? absint( $data['qty_alt'] ) : absint( $data['qty_missing'] );
         $qty_alt = max( 1, min( $qty_alt, $item->get_quantity() ) );
 
-        $original_unit = self::get_item_unit_price_incl_tax( $item );
+        $settings             = self::get_settings();
+        $price_handling_mode  = isset( $settings['alt_price_handling'] ) ? $settings['alt_price_handling'] : 'charge_customer';
+        $original_product     = $item->get_product();
+        $original_name        = $original_product ? $original_product->get_name() : $item->get_name();
+        $original_unit_incl   = self::get_item_unit_price_incl_tax( $item );
+        $original_unit_excl   = self::get_item_unit_price_excl_tax( $item );
+        $original_unit_tax    = max( 0, $original_unit_incl - $original_unit_excl );
+        $alt_unit_incl        = self::get_product_unit_price_incl_tax( $alt_product );
+        $delta_per_unit       = $alt_unit_incl - $original_unit_incl;
+        $final_delta          = wc_format_decimal( $delta_per_unit * $qty_alt, wc_get_price_decimals() );
+
         if ( 'replace' === $mode ) {
             $new_qty = max( 0, $item->get_quantity() - $qty_alt );
             $item->set_quantity( $new_qty );
             $item->save();
+        } else {
+            self::reduce_original_line_totals_for_added_alternative( $item, $qty_alt );
+            $item->save();
         }
 
-        $order->add_product( $alt_product, $qty_alt );
-
-        $alt_unit      = self::get_product_unit_price_incl_tax( $alt_product );
-        $difference    = ( $alt_unit - $original_unit ) * $qty_alt;
-        $difference    = wc_format_decimal( $difference, wc_get_price_decimals() );
-
-        if ( $difference > 0 ) {
-            self::handle_price_difference_surcharge( $order, $difference, $alt_product, $qty_alt );
-        } elseif ( $difference < 0 ) {
-            $order->add_order_note( sprintf( __( 'Alternative %1$s was cheaper by %2$s for %3$d unit(s).', 'lp-missing' ), $alt_product->get_name(), wc_price( abs( $difference ), array( 'currency' => $order->get_currency() ) ), $qty_alt ) );
+        $alt_item_id = $order->add_product( $alt_product, $qty_alt );
+        if ( ! $alt_item_id ) {
+            return array( 'status' => 'error', 'message' => __( 'Could not add selected alternative to the order.', 'lp-missing' ) );
         }
+
+        $alt_item = $order->get_item( $alt_item_id );
+        if ( $alt_item ) {
+            self::set_item_totals_from_unit_values( $alt_item, $qty_alt, $original_unit_excl, $original_unit_tax );
+            $alt_item->add_meta_data( '_lp_missing_alt_pricing_source', 'original_comparison_unit', true );
+            $alt_item->add_meta_data( '_lp_missing_alt_original_item_id', absint( $item_id ), true );
+            $alt_item->save();
+        }
+
+        $surcharge_result = self::handle_price_difference_surcharge( $order, $final_delta, $original_name, $alt_product->get_name(), $qty_alt, $original_unit_incl, $alt_unit_incl, $price_handling_mode );
 
         $new_data = $data;
         $new_data['status'] = 'alt_applied';
@@ -748,13 +764,17 @@ JS;
         self::maybe_adjust_stock( $item, $data, $new_data, $order );
         $item->update_meta_data( self::META_KEY, $new_data );
         $item->save();
-        $order->calculate_totals( true );
+        $order->calculate_totals( false );
 
         $note_parts   = array();
         $note_parts[] = sprintf( __( 'Applied customer-selected alternative %1$s (Qty %2$d).', 'lp-missing' ), $alt_product->get_name(), $qty_alt );
         $note_parts[] = sprintf( __( 'Mode: %s.', 'lp-missing' ), 'replace' === $mode ? __( 'Replace', 'lp-missing' ) : __( 'Add new line', 'lp-missing' ) );
-        if ( 0 != $difference ) {
-            $note_parts[] = sprintf( __( 'Price difference: %s.', 'lp-missing' ), wc_price( $difference, array( 'currency' => $order->get_currency() ) ) );
+        $note_parts[] = sprintf( __( 'Original product: %1$s. Alternative product: %2$s. Qty: %3$d.', 'lp-missing' ), $original_name, $alt_product->get_name(), $qty_alt );
+        $note_parts[] = sprintf( __( 'Original unit amount used for comparison: %1$s. Alternative unit amount used for comparison: %2$s.', 'lp-missing' ), wc_price( $original_unit_incl, array( 'currency' => $order->get_currency() ) ), wc_price( $alt_unit_incl, array( 'currency' => $order->get_currency() ) ) );
+        $note_parts[] = sprintf( __( 'Final delta: %s.', 'lp-missing' ), wc_price( $final_delta, array( 'currency' => $order->get_currency() ) ) );
+        $note_parts[] = sprintf( __( 'Price handling: %s.', 'lp-missing' ), 'store_covers' === $surcharge_result['mode'] ? __( 'Store covers any extra cost', 'lp-missing' ) : __( 'Customer is charged delta via separate surcharge order when positive', 'lp-missing' ) );
+        if ( ! empty( $surcharge_result['summary_note'] ) ) {
+            $note_parts[] = $surcharge_result['summary_note'];
         }
         $order->add_order_note( implode( ' ', $note_parts ) );
 
@@ -821,6 +841,37 @@ JS;
         return $total / $qty;
     }
 
+    protected static function get_item_unit_price_excl_tax( $item ) {
+        $qty   = max( 1, $item->get_quantity() );
+        $total = floatval( $item->get_total() );
+        return $total / $qty;
+    }
+
+    protected static function set_item_totals_from_unit_values( $item, $qty, $unit_excl_tax, $unit_tax ) {
+        $qty = max( 1, absint( $qty ) );
+        $line_total     = wc_format_decimal( $unit_excl_tax * $qty, wc_get_price_decimals() );
+        $line_total_tax = wc_format_decimal( max( 0, $unit_tax ) * $qty, wc_get_price_decimals() );
+
+        $item->set_subtotal( $line_total );
+        $item->set_total( $line_total );
+        $item->set_subtotal_tax( $line_total_tax );
+        $item->set_total_tax( $line_total_tax );
+    }
+
+    protected static function reduce_original_line_totals_for_added_alternative( $item, $qty_alt ) {
+        $qty_alt            = max( 1, absint( $qty_alt ) );
+        $original_unit_excl = self::get_item_unit_price_excl_tax( $item );
+        $original_unit_tax  = max( 0, self::get_item_unit_price_incl_tax( $item ) - $original_unit_excl );
+
+        $new_total_excl = max( 0, floatval( $item->get_total() ) - ( $original_unit_excl * $qty_alt ) );
+        $new_total_tax  = max( 0, floatval( $item->get_total_tax() ) - ( $original_unit_tax * $qty_alt ) );
+
+        $item->set_total( wc_format_decimal( $new_total_excl, wc_get_price_decimals() ) );
+        $item->set_subtotal( wc_format_decimal( max( 0, floatval( $item->get_subtotal() ) - ( $original_unit_excl * $qty_alt ) ), wc_get_price_decimals() ) );
+        $item->set_total_tax( wc_format_decimal( $new_total_tax, wc_get_price_decimals() ) );
+        $item->set_subtotal_tax( wc_format_decimal( max( 0, floatval( $item->get_subtotal_tax() ) - ( $original_unit_tax * $qty_alt ) ), wc_get_price_decimals() ) );
+    }
+
     protected static function get_product_unit_price_incl_tax( $product ) {
         return (float) wc_get_price_including_tax( $product, array( 'qty' => 1 ) );
     }
@@ -846,17 +897,31 @@ JS;
         );
     }
 
-    protected static function handle_price_difference_surcharge( $order, $difference, $alt_product, $qty_alt ) {
-        $settings = self::get_settings();
-        if ( 'store_covers' === $settings['alt_price_handling'] ) {
-            $order->add_order_note( sprintf( __( 'Store covered %1$s extra for alternative %2$s (Qty %3$d).', 'lp-missing' ), wc_price( $difference, array( 'currency' => $order->get_currency() ) ), $alt_product->get_name(), $qty_alt ) );
-            return;
+    protected static function handle_price_difference_surcharge( $order, $difference, $original_product_name, $alt_product_name, $qty_alt, $original_unit, $alt_unit, $price_handling_mode = 'charge_customer' ) {
+        $difference = wc_format_decimal( $difference, wc_get_price_decimals() );
+        $result = array(
+            'mode'         => 'store_covers' === $price_handling_mode ? 'store_covers' : 'charge_customer',
+            'summary_note' => '',
+        );
+
+        if ( $difference <= 0 ) {
+            if ( $difference < 0 ) {
+                $result['summary_note'] = sprintf( __( 'Cheaper alternative: no surcharge order created and no negative surcharge applied. Difference retained on original order totals: %1$s.', 'lp-missing' ), wc_price( $difference, array( 'currency' => $order->get_currency() ) ) );
+            } else {
+                $result['summary_note'] = __( 'No price delta between original and alternative; no surcharge order created.', 'lp-missing' );
+            }
+            return $result;
+        }
+
+        if ( 'store_covers' === $result['mode'] ) {
+            $result['summary_note'] = sprintf( __( 'Store covers additional cost of %1$s; no surcharge order created.', 'lp-missing' ), wc_price( $difference, array( 'currency' => $order->get_currency() ) ) );
+            return $result;
         }
 
         $surcharge_order = wc_create_order( array( 'customer_id' => $order->get_customer_id() ) );
         if ( is_wp_error( $surcharge_order ) ) {
-            $order->add_order_note( sprintf( __( 'Could not create surcharge order for alternative: %s', 'lp-missing' ), $surcharge_order->get_error_message() ) );
-            return;
+            $result['summary_note'] = sprintf( __( 'Could not create surcharge order for price delta: %s', 'lp-missing' ), $surcharge_order->get_error_message() );
+            return $result;
         }
         $surcharge_order->set_parent_id( $order->get_id() );
         $surcharge_order->set_currency( $order->get_currency() );
@@ -870,15 +935,28 @@ JS;
         $surcharge_order->add_item( $fee );
         $surcharge_order->calculate_totals( true );
         $surcharge_order->set_status( 'pending' );
-        $surcharge_order->add_order_note( sprintf( __( 'Surcharge created for alternative %1$s (Qty %2$d) chosen on order #%3$s.', 'lp-missing' ), $alt_product->get_name(), $qty_alt, $order->get_order_number() ) );
+        $surcharge_order->add_order_note(
+            sprintf(
+                __( 'Surcharge created for alternative %1$s (Qty %2$d) chosen on order #%3$s. Original product: %4$s. Original unit: %5$s. Alternative unit: %6$s. Delta: %7$s.', 'lp-missing' ),
+                $alt_product_name,
+                $qty_alt,
+                $order->get_order_number(),
+                $original_product_name,
+                wc_price( $original_unit, array( 'currency' => $order->get_currency() ) ),
+                wc_price( $alt_unit, array( 'currency' => $order->get_currency() ) ),
+                wc_price( $difference, array( 'currency' => $order->get_currency() ) )
+            )
+        );
         $surcharge_order->save();
 
-        $order->add_order_note( sprintf( __( 'Created surcharge order #%1$s for alternative %2$s (Qty %3$d). Amount: %4$s.', 'lp-missing' ), $surcharge_order->get_order_number(), $alt_product->get_name(), $qty_alt, wc_price( $difference, array( 'currency' => $order->get_currency() ) ) ) );
+        $result['summary_note'] = sprintf( __( 'Created surcharge order #%1$s for delta %2$s.', 'lp-missing' ), $surcharge_order->get_order_number(), wc_price( $difference, array( 'currency' => $order->get_currency() ) ) );
 
         $mailer = WC()->mailer();
         if ( $mailer && isset( $mailer->emails['WC_Email_Customer_Invoice'] ) ) {
             $mailer->emails['WC_Email_Customer_Invoice']->trigger( $surcharge_order->get_id(), $surcharge_order );
         }
+
+        return $result;
     }
 
     public static function admin_notices() {
