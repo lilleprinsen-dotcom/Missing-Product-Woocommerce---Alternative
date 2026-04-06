@@ -825,6 +825,27 @@ JS;
         return (float) wc_get_price_including_tax( $product, array( 'qty' => 1 ) );
     }
 
+    public static function get_customer_first_name( $order ) {
+        $name = trim( (string) $order->get_billing_first_name() );
+        return '' === $name ? __( 'der', 'lp-missing' ) : $name;
+    }
+
+    protected static function get_alternative_price_delta( $order, $item, $alt_product, $qty = 1 ) {
+        $qty = max( 1, absint( $qty ) );
+        $original_unit = self::get_item_unit_price_incl_tax( $item );
+        $alt_unit      = self::get_product_unit_price_incl_tax( $alt_product );
+        $delta_unit    = $alt_unit - $original_unit;
+        $delta_total   = $delta_unit * $qty;
+
+        return array(
+            'unit_delta_raw'  => $delta_unit,
+            'total_delta_raw' => $delta_total,
+            'unit_delta'      => wc_price( $delta_unit, array( 'currency' => $order->get_currency() ) ),
+            'total_delta'     => wc_price( $delta_total, array( 'currency' => $order->get_currency() ) ),
+            'direction'       => $delta_unit > 0 ? 'up' : ( $delta_unit < 0 ? 'down' : 'same' ),
+        );
+    }
+
     protected static function handle_price_difference_surcharge( $order, $difference, $alt_product, $qty_alt ) {
         $settings = self::get_settings();
         if ( 'store_covers' === $settings['alt_price_handling'] ) {
@@ -843,7 +864,7 @@ JS;
         $surcharge_order->set_address( $order->get_address( 'shipping' ), 'shipping' );
 
         $fee = new WC_Order_Item_Fee();
-        $fee->set_name( sprintf( __( 'Price difference for alternative on order #%s', 'lp-missing' ), $order->get_order_number() ) );
+        $fee->set_name( sprintf( __( 'Mellomlegg for alternativ vare på ordre #%s', 'lp-missing' ), $order->get_order_number() ) );
         $fee->set_amount( $difference );
         $fee->set_total( $difference );
         $surcharge_order->add_item( $fee );
@@ -1613,10 +1634,10 @@ JS;
         }
         $order = wc_get_order( $order_id );
         if ( ! $order ) {
-            return array( null, '', __( 'This link is invalid or expired.', 'lp-missing' ) );
+            return array( null, '', __( 'Lenken er ugyldig eller utløpt.', 'lp-missing' ) );
         }
         if ( ! self::validate_signature( $order_id, $order->get_billing_email(), $key ) ) {
-            return array( null, '', __( 'This link is invalid or expired.', 'lp-missing' ) );
+            return array( null, '', __( 'Lenken er ugyldig eller utløpt.', 'lp-missing' ) );
         }
         return array( $order, $order->get_billing_email(), '' );
     }
@@ -1636,14 +1657,14 @@ JS;
         if ( isset( $_POST['lp_missing_verify_email'] ) ) {
             $nonce = isset( $_POST['lp_missing_verify_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['lp_missing_verify_nonce'] ) ) : '';
             if ( ! wp_verify_nonce( $nonce, 'lp_missing_verify_' . $order->get_id() ) ) {
-                $error = __( 'Security check failed. Please try again.', 'lp-missing' );
+                $error = __( 'Sikkerhetssjekk feilet. Prøv igjen.', 'lp-missing' );
                 return false;
             }
             $submitted = sanitize_email( wp_unslash( $_POST['lp_missing_verify_email'] ) );
             if ( $submitted && strtolower( $submitted ) === strtolower( $billing_email ) ) {
                 return true;
             }
-            $error = __( 'Email does not match our records for this order.', 'lp-missing' );
+            $error = __( 'E-postadressen stemmer ikke med denne ordren.', 'lp-missing' );
         }
         return false;
     }
@@ -1657,15 +1678,15 @@ JS;
             return array( 'message' => '', 'status' => '' );
         }
         if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lp_missing_nonce'] ) ), 'lp_missing_portal_' . $order->get_id() ) ) {
-            return array( 'message' => __( 'Security check failed.', 'lp-missing' ), 'status' => 'error' );
+            return array( 'message' => __( 'Sikkerhetssjekk feilet.', 'lp-missing' ), 'status' => 'error' );
         }
         if ( strtolower( $order->get_billing_email() ) !== strtolower( $email ) ) {
-            return array( 'message' => __( 'Email does not match this order.', 'lp-missing' ), 'status' => 'error' );
+            return array( 'message' => __( 'E-postadressen stemmer ikke med denne ordren.', 'lp-missing' ), 'status' => 'error' );
         }
         $key = self::rate_limit_key( $order->get_id(), $email );
         $count = (int) get_transient( $key );
         if ( $count >= 5 ) {
-            return array( 'message' => __( 'Too many actions. Please wait and try again.', 'lp-missing' ), 'status' => 'error' );
+            return array( 'message' => __( 'Du gjorde mange valg på kort tid. Vent litt og prøv igjen.', 'lp-missing' ), 'status' => 'error' );
         }
         set_transient( $key, $count + 1, MINUTE_IN_SECONDS );
 
@@ -1674,12 +1695,12 @@ JS;
         $items     = $order->get_items( 'line_item' );
         $item      = isset( $items[ $item_id ] ) ? $items[ $item_id ] : null;
         if ( ! $item ) {
-            return array( 'message' => __( 'Invalid item selected.', 'lp-missing' ), 'status' => 'error' );
+            return array( 'message' => __( 'Ugyldig vare valgt.', 'lp-missing' ), 'status' => 'error' );
         }
 
         $existing = self::get_item_data( $item );
         if ( empty( $existing['missing'] ) ) {
-            return array( 'message' => __( 'Item is not marked as missing.', 'lp-missing' ), 'status' => 'error' );
+            return array( 'message' => __( 'Denne varen er ikke markert som manglende.', 'lp-missing' ), 'status' => 'error' );
         }
 
         $new = $existing;
@@ -1689,10 +1710,10 @@ JS;
             $alt_id = isset( $_POST['lp_missing_alt_id'] ) ? absint( $_POST['lp_missing_alt_id'] ) : 0;
             $qty_alt = isset( $_POST['lp_missing_alt_qty'] ) ? absint( $_POST['lp_missing_alt_qty'] ) : 0;
             if ( $qty_alt < 1 || $qty_alt > $existing['qty_missing'] ) {
-                return array( 'message' => __( 'Invalid quantity selected.', 'lp-missing' ), 'status' => 'error' );
+                return array( 'message' => __( 'Ugyldig antall valgt.', 'lp-missing' ), 'status' => 'error' );
             }
             if ( ! in_array( $alt_id, $existing['alternatives'], true ) ) {
-                return array( 'message' => __( 'Alternative not allowed.', 'lp-missing' ), 'status' => 'error' );
+                return array( 'message' => __( 'Dette alternativet kan ikke velges.', 'lp-missing' ), 'status' => 'error' );
             }
             $new['status'] = 'alt_pending';
             $new['selected_alt_id'] = $alt_id;
@@ -1703,11 +1724,11 @@ JS;
             $new['qty_alt'] = 0;
         } elseif ( 'accept_delete' === $action ) {
             if ( empty( $existing['propose_delete'] ) ) {
-                return array( 'message' => __( 'Deletion not available for this item.', 'lp-missing' ), 'status' => 'error' );
+                return array( 'message' => __( 'Sletting er ikke tilgjengelig for denne varen.', 'lp-missing' ), 'status' => 'error' );
             }
             $new['status'] = 'delete_pending';
         } else {
-            return array( 'message' => __( 'Unknown action.', 'lp-missing' ), 'status' => 'error' );
+            return array( 'message' => __( 'Ukjent handling.', 'lp-missing' ), 'status' => 'error' );
         }
 
         if ( in_array( $new['status'], array( 'alt_pending', 'delete_pending' ), true ) ) {
@@ -1727,7 +1748,7 @@ JS;
             do_action( 'lp_missing_item_updated', $order, $item_id, $new, $existing );
         }
 
-        return array( 'message' => __( 'Your choice has been saved.', 'lp-missing' ), 'status' => 'success' );
+        return array( 'message' => __( 'Takk! Valget ditt er lagret 💛', 'lp-missing' ), 'status' => 'success' );
     }
 
     public static function render_shortcode( $atts ) {
@@ -1748,7 +1769,7 @@ JS;
         if ( ! $using_magic ) {
             list( $order, $email ) = self::get_order_for_shortcode( $atts );
             if ( ! $order ) {
-                return '<div class="lp-missing-portal-error">' . esc_html__( 'Order not found or email does not match.', 'lp-missing' ) . '</div>';
+                return '<div class="lp-missing-portal-error">' . esc_html__( 'Fant ikke ordren, eller e-postadressen stemmer ikke.', 'lp-missing' ) . '</div>';
             }
             $email_verified = true;
         } else {
@@ -1761,11 +1782,11 @@ JS;
                 echo '<div class="lp-missing-portal-error">' . esc_html( $verify_error ) . '</div>';
             }
             echo '<div class="lp-missing-portal-verify">';
-            echo '<p>' . esc_html__( 'Please confirm the email you used at checkout to continue.', 'lp-missing' ) . '</p>';
+            echo '<p>' . esc_html__( 'Bekreft e-postadressen du brukte i kassen for å fortsette.', 'lp-missing' ) . '</p>';
             echo '<form method="post">';
             wp_nonce_field( 'lp_missing_verify_' . $order->get_id(), 'lp_missing_verify_nonce' );
-            echo '<label>' . esc_html__( 'Email address', 'lp-missing' ) . ' <input type="email" name="lp_missing_verify_email" required /></label> ';
-            echo '<button type="submit">' . esc_html__( 'Continue', 'lp-missing' ) . '</button>';
+            echo '<label>' . esc_html__( 'E-postadresse', 'lp-missing' ) . ' <input type="email" name="lp_missing_verify_email" required /></label> ';
+            echo '<button type="submit">' . esc_html__( 'Fortsett', 'lp-missing' ) . '</button>';
             echo '</form>';
             echo '</div>';
             return ob_get_clean();
@@ -1786,7 +1807,7 @@ JS;
             }
         }
         if ( empty( $missing_items ) ) {
-            return '<div class="lp-missing-portal-empty">' . esc_html__( 'Nothing is waiting for your decision.', 'lp-missing' ) . '</div>';
+            return '<div class="lp-missing-portal-empty">' . esc_html__( 'Alt er i orden 🎉 Ingen valg venter på deg nå.', 'lp-missing' ) . '</div>';
         }
 
         $alt_products = array();
@@ -1802,24 +1823,45 @@ JS;
             $class = 'success' === $response['status'] ? 'lp-message-success' : 'lp-message-error';
             echo '<div class="' . esc_attr( $class ) . '">' . esc_html( $response['message'] ) . '</div>';
         }
+        $customer_name = self::get_customer_first_name( $order );
+        echo '<style>
+            .lp-missing-portal{font-family:inherit;display:grid;gap:12px}
+            .lp-portal-card{border:1px solid #e5e7eb;border-radius:12px;padding:14px;background:#fff}
+            .lp-portal-muted{color:#6b7280;font-size:14px}
+            .lp-pill{display:inline-block;background:#f3f4f6;border-radius:999px;padding:3px 10px;font-size:12px;margin-top:6px}
+            .lp-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+            .lp-btn{border:1px solid #d1d5db;background:#111827;color:#fff;border-radius:8px;padding:8px 12px;cursor:pointer}
+            .lp-btn--secondary{background:#fff;color:#111827}
+            .lp-message-success,.lp-message-error{border-radius:10px;padding:10px 12px;margin-bottom:10px}
+            .lp-message-success{background:#ecfdf5;border:1px solid #10b981}
+            .lp-message-error{background:#fef2f2;border:1px solid #ef4444}
+        </style>';
         echo '<div class="lp-missing-portal">';
+        echo '<div class="lp-portal-card"><strong>' . esc_html( sprintf( __( 'Hei %s 👋', 'lp-missing' ), $customer_name ) ) . '</strong><div class="lp-portal-muted">' . esc_html__( 'Vi hjelper deg å velge hva som skal skje med varer som mangler. Velg det som passer best for deg.', 'lp-missing' ) . '</div></div>';
         foreach ( $missing_items as $item_id => $payload ) {
             $item = $payload['item'];
             $data = $payload['data'];
             $product = $item->get_product();
             $product_name = $product ? $product->get_name() : $item->get_name();
-            echo '<div class="lp-portal-item" style="border:1px solid #ddd;padding:10px;margin-bottom:12px;">';
-            echo '<strong>' . esc_html( $product_name ) . '</strong>'; 
-            echo '<div>' . sprintf( esc_html__( 'Ordered: %1$s | Missing: %2$s', 'lp-missing' ), esc_html( $item->get_quantity() ), esc_html( $data['qty_missing'] ) ) . '</div>';
+            echo '<div class="lp-portal-card lp-portal-item">';
+            echo '<strong>' . esc_html( $product_name ) . '</strong>';
+            echo '<div class="lp-portal-muted">' . sprintf( esc_html__( 'Bestilt: %1$s stk · Mangler: %2$s stk', 'lp-missing' ), esc_html( $item->get_quantity() ), esc_html( $data['qty_missing'] ) ) . '</div>';
             if ( ! empty( $data['notes'] ) ) {
-                echo '<div>' . esc_html( $data['notes'] ) . '</div>';
+                echo '<div class="lp-pill">' . esc_html( $data['notes'] ) . '</div>';
             }
             if ( ! empty( $data['alternatives'] ) ) {
-                echo '<div><em>' . esc_html__( 'Suggested alternatives:', 'lp-missing' ) . '</em><ul style="margin:6px 0 0; padding-left:18px;">';
+                echo '<div style="margin-top:8px;"><em>' . esc_html__( 'Forslag til alternativ:', 'lp-missing' ) . '</em><ul style="margin:6px 0 0; padding-left:18px;">';
                 foreach ( $data['alternatives'] as $alt_id ) {
                     $alt_product = isset( $alt_products[ $alt_id ] ) ? $alt_products[ $alt_id ] : wc_get_product( $alt_id );
                     if ( ! $alt_product ) {
                         continue;
+                    }
+                    $delta = self::get_alternative_price_delta( $order, $item, $alt_product, $data['qty_missing'] );
+                    $delta_text = __( 'Samme pris som original vare', 'lp-missing' );
+                    if ( 'up' === $delta['direction'] ) {
+                        $delta_text = sprintf( __( 'Koster %1$s mer per stk (%2$s mer for %3$s stk)', 'lp-missing' ), $delta['unit_delta'], $delta['total_delta'], $data['qty_missing'] );
+                    } elseif ( 'down' === $delta['direction'] ) {
+                        $delta_text = sprintf( __( 'Koster %1$s mindre per stk (%2$s mindre for %3$s stk)', 'lp-missing' ), wc_price( abs( $delta['unit_delta_raw'] ), array( 'currency' => $order->get_currency() ) ), wc_price( abs( $delta['total_delta_raw'] ), array( 'currency' => $order->get_currency() ) ), $data['qty_missing'] );
                     }
                     echo '<li>';
                     echo '<a href="' . esc_url( get_permalink( $alt_product->get_id() ) ) . '" target="_blank" rel="noopener noreferrer">' . esc_html( $alt_product->get_name() ) . '</a>';
@@ -1827,50 +1869,69 @@ JS;
                     if ( $sku ) {
                         echo ' <small>(' . esc_html( $sku ) . ')</small>';
                     }
+                    echo '<div class="lp-portal-muted">' . esc_html( $delta_text ) . '</div>';
                     echo '</li>';
                 }
                 echo '</ul></div>';
             }
 
             if ( self::has_customer_decision( $data ) ) {
-                echo '<div style="margin-top:8px;">' . esc_html__( 'Thanks! Your choice has been recorded. Our team will apply it soon.', 'lp-missing' ) . '</div>';
+                echo '<div style="margin-top:8px;">' . esc_html__( 'Tusen takk! Valget ditt er registrert 💚 Teamet vårt oppdaterer ordren snart.', 'lp-missing' ) . '</div>';
                 if ( 'alt_pending' === $data['status'] && ! empty( $data['selected_alt_id'] ) ) {
                     $alt_product = isset( $alt_products[ $data['selected_alt_id'] ] ) ? $alt_products[ $data['selected_alt_id'] ] : wc_get_product( $data['selected_alt_id'] );
                     if ( $alt_product ) {
-                        echo '<div><em>' . esc_html__( 'You picked:', 'lp-missing' ) . '</em> ' . esc_html( $alt_product->get_name() ) . ' &times; ' . esc_html( $data['qty_alt'] ? $data['qty_alt'] : $data['qty_missing'] ) . '</div>';
+                        $selected_qty = $data['qty_alt'] ? $data['qty_alt'] : $data['qty_missing'];
+                        $delta = self::get_alternative_price_delta( $order, $item, $alt_product, $selected_qty );
+                        echo '<div><em>' . esc_html__( 'Du valgte:', 'lp-missing' ) . '</em> ' . esc_html( $alt_product->get_name() ) . ' &times; ' . esc_html( $selected_qty ) . '</div>';
+                        if ( 'up' === $delta['direction'] ) {
+                            echo '<div class="lp-portal-muted">' . esc_html( sprintf( __( 'Pris: %s mer totalt.', 'lp-missing' ), $delta['total_delta'] ) ) . '</div>';
+                        } elseif ( 'down' === $delta['direction'] ) {
+                            echo '<div class="lp-portal-muted">' . esc_html( sprintf( __( 'Pris: %s mindre totalt.', 'lp-missing' ), wc_price( abs( $delta['total_delta_raw'] ), array( 'currency' => $order->get_currency() ) ) ) ) . '</div>';
+                        } else {
+                            echo '<div class="lp-portal-muted">' . esc_html__( 'Pris: ingen forskjell.', 'lp-missing' ) . '</div>';
+                        }
                     }
                 } elseif ( 'delete_pending' === $data['status'] ) {
-                    echo '<div><em>' . esc_html__( 'You approved deleting this line.', 'lp-missing' ) . '</em></div>';
+                    echo '<div><em>' . esc_html__( 'Du godkjente å fjerne denne varen.', 'lp-missing' ) . '</em></div>';
                 }
             } else {
-                echo '<form method="post" style="margin-top:8px;">';
+                echo '<form method="post" class="lp-actions">';
                 wp_nonce_field( 'lp_missing_portal_' . $order->get_id(), 'lp_missing_nonce' );
                 echo '<input type="hidden" name="lp_missing_item_id" value="' . absint( $item_id ) . '" />';
 
                 if ( ! empty( $data['alternatives'] ) ) {
-                    echo '<div style="margin-bottom:8px;">';
-                    echo '<label>' . esc_html__( 'Choose an alternative:', 'lp-missing' ) . ' ';
+                    echo '<div>';
+                    echo '<label>' . esc_html__( 'Velg alternativ:', 'lp-missing' ) . ' ';
                     echo '<select name="lp_missing_alt_id">';
                     foreach ( $data['alternatives'] as $alt_id ) {
                         $alt_product = isset( $alt_products[ $alt_id ] ) ? $alt_products[ $alt_id ] : wc_get_product( $alt_id );
                         if ( ! $alt_product ) {
                             continue;
                         }
-                        echo '<option value="' . absint( $alt_id ) . '">' . esc_html( $alt_product->get_name() ) . '</option>';
+                        $delta = self::get_alternative_price_delta( $order, $item, $alt_product, $data['qty_missing'] );
+                        $option_label = $alt_product->get_name();
+                        if ( 'up' === $delta['direction'] ) {
+                            $option_label .= ' (+' . wp_strip_all_tags( $delta['unit_delta'] ) . ' /stk)';
+                        } elseif ( 'down' === $delta['direction'] ) {
+                            $option_label .= ' (-' . wp_strip_all_tags( wc_price( abs( $delta['unit_delta_raw'] ), array( 'currency' => $order->get_currency() ) ) ) . ' /stk)';
+                        } else {
+                            $option_label .= ' (' . __( 'samme pris', 'lp-missing' ) . ')';
+                        }
+                        echo '<option value="' . absint( $alt_id ) . '">' . esc_html( $option_label ) . '</option>';
                     }
                     echo '</select></label> ';
-                    echo '<label>' . esc_html__( 'Quantity', 'lp-missing' ) . ' <input type="number" min="1" max="' . esc_attr( $data['qty_missing'] ) . '" name="lp_missing_alt_qty" value="' . esc_attr( $data['qty_missing'] ) . '" style="width:70px;" /></label> ';
-                    echo '<button type="submit" name="lp_missing_action" value="accept_alt">' . esc_html__( 'Accept alternative', 'lp-missing' ) . '</button>';
+                    echo '<label>' . esc_html__( 'Antall', 'lp-missing' ) . ' <input type="number" min="1" max="' . esc_attr( $data['qty_missing'] ) . '" name="lp_missing_alt_qty" value="' . esc_attr( $data['qty_missing'] ) . '" style="width:70px;" /></label> ';
+                    echo '<button class="lp-btn" type="submit" name="lp_missing_action" value="accept_alt">' . esc_html__( '✅ Velg dette alternativet', 'lp-missing' ) . '</button>';
                     echo '</div>';
                 }
 
-                echo '<div style="margin-bottom:8px;">';
-                echo '<button type="submit" name="lp_missing_action" value="decline_all">' . esc_html__( 'Decline all alternatives', 'lp-missing' ) . '</button>';
+                echo '<div>';
+                echo '<button class="lp-btn lp-btn--secondary" type="submit" name="lp_missing_action" value="decline_all">' . esc_html__( '❌ Nei takk til alternativer', 'lp-missing' ) . '</button>';
                 echo '</div>';
 
                 if ( ! empty( $data['propose_delete'] ) ) {
-                    echo '<div style="margin-bottom:8px;">';
-                    echo '<button type="submit" name="lp_missing_action" value="accept_delete">' . esc_html__( 'Accept deletion of this item', 'lp-missing' ) . '</button>';
+                    echo '<div>';
+                    echo '<button class="lp-btn lp-btn--secondary" type="submit" name="lp_missing_action" value="accept_delete">' . esc_html__( '🗑️ Fjern denne varen fra ordren', 'lp-missing' ) . '</button>';
                     echo '</div>';
                 }
                 echo '</form>';
@@ -1992,10 +2053,10 @@ class LP_Missing_Product_Email extends WC_Email {
     public function __construct() {
         $this->id             = 'lp_missing_customer_email';
         $this->customer_email = true;
-        $this->title          = __( 'Missing items customer portal', 'lp-missing' );
-        $this->description    = __( 'Email prompting customers to review missing item options via the secure portal.', 'lp-missing' );
-        $this->heading        = __( 'Action needed for your order', 'lp-missing' );
-        $this->subject        = __( 'Items missing from your order #{order_number}', 'lp-missing' );
+        $this->title          = __( 'Manglende varer – kundeportal', 'lp-missing' );
+        $this->description    = __( 'E-post som ber kunden velge løsning for manglende varer i en sikker portal.', 'lp-missing' );
+        $this->heading        = __( 'Vi trenger et raskt valg fra deg 💛', 'lp-missing' );
+        $this->subject        = __( 'Vi mangler noen varer i ordre #{order_number}', 'lp-missing' );
         $this->placeholders   = array(
             '{order_number}' => '',
             '{magic_link}'   => '',
@@ -2023,13 +2084,15 @@ class LP_Missing_Product_Email extends WC_Email {
     public function get_content_html() {
         ob_start();
         wc_get_template( 'emails/email-header.php', array( 'email_heading' => $this->get_heading(), 'email' => $this ) );
+        $name = LP_Missing_Product_Handler::get_customer_first_name( $this->object );
         ?>
-        <p><?php printf( esc_html__( 'Some items in your order %s are unavailable.', 'lp-missing' ), esc_html( $this->object->get_order_number() ) ); ?></p>
-        <p><?php esc_html_e( 'Please review your options using the secure link below.', 'lp-missing' ); ?></p>
+        <p><?php printf( esc_html__( 'Hei %1$s 👋 Vi har dessverre ikke alt på lager i ordre %2$s.', 'lp-missing' ), esc_html( $name ), esc_html( $this->object->get_order_number() ) ); ?></p>
+        <p><?php esc_html_e( 'Trykk på knappen under for å velge et alternativ. Det tar bare et minutt.', 'lp-missing' ); ?></p>
+        <p><?php esc_html_e( 'På valgsiden ser du tydelig om et alternativ koster mer, mindre eller det samme som originalen.', 'lp-missing' ); ?></p>
         <p>
-            <a class="button" href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php esc_html_e( 'Review options', 'lp-missing' ); ?></a>
+            <a class="button" href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php esc_html_e( 'Åpne valgside', 'lp-missing' ); ?></a>
         </p>
-        <p><?php esc_html_e( 'If the button does not work, copy and paste this link into your browser:', 'lp-missing' ); ?><br />
+        <p><?php esc_html_e( 'Hvis knappen ikke virker, kopier denne lenken inn i nettleseren:', 'lp-missing' ); ?><br />
             <a href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php echo esc_html( $this->placeholders['{magic_link}'] ); ?></a>
         </p>
         <?php
@@ -2038,9 +2101,11 @@ class LP_Missing_Product_Email extends WC_Email {
     }
 
     public function get_content_plain() {
+        $name = LP_Missing_Product_Handler::get_customer_first_name( $this->object );
         $lines = array(
-            sprintf( __( 'Some items in your order %s are unavailable.', 'lp-missing' ), $this->object->get_order_number() ),
-            __( 'Please review your options using the secure link below.', 'lp-missing' ),
+            sprintf( __( 'Hei %1$s! Vi mangler noen varer i ordre %2$s.', 'lp-missing' ), $name, $this->object->get_order_number() ),
+            __( 'Velg hva som passer best for deg i den sikre lenken under.', 'lp-missing' ),
+            __( 'Du får en enkel prisoversikt som viser om alternativet blir dyrere eller billigere.', 'lp-missing' ),
             $this->placeholders['{magic_link}'],
         );
         return implode( "\n\n", $lines );
@@ -2054,10 +2119,10 @@ class LP_Missing_Product_Reminder_Email extends WC_Email {
     public function __construct() {
         $this->id             = 'lp_missing_customer_reminder';
         $this->customer_email = true;
-        $this->title          = __( 'Missing items reminder', 'lp-missing' );
-        $this->description    = __( 'Reminder email prompting customers to resolve missing items.', 'lp-missing' );
-        $this->heading        = __( 'Reminder: action needed for your order', 'lp-missing' );
-        $this->subject        = __( 'Reminder: missing item options for order #{order_number}', 'lp-missing' );
+        $this->title          = __( 'Påminnelse – manglende varer', 'lp-missing' );
+        $this->description    = __( 'Påminnelse til kunden om å velge løsning for manglende varer.', 'lp-missing' );
+        $this->heading        = __( 'Liten påminnelse fra oss 💌', 'lp-missing' );
+        $this->subject        = __( 'Påminnelse: vi venter på valget ditt for ordre #{order_number}', 'lp-missing' );
         $this->placeholders   = array(
             '{order_number}' => '',
             '{magic_link}'   => '',
@@ -2092,13 +2157,15 @@ class LP_Missing_Product_Reminder_Email extends WC_Email {
     public function get_content_html() {
         ob_start();
         wc_get_template( 'emails/email-header.php', array( 'email_heading' => $this->get_heading(), 'email' => $this ) );
+        $name = LP_Missing_Product_Handler::get_customer_first_name( $this->object );
         ?>
-        <p><?php printf( esc_html__( 'We still need your decision for %1$s on order %2$s.', 'lp-missing' ), esc_html( $this->placeholders['{item_name}'] ), esc_html( $this->object->get_order_number() ) ); ?></p>
-        <p><?php esc_html_e( 'Please review your options using the secure link below.', 'lp-missing' ); ?></p>
+        <p><?php printf( esc_html__( 'Hei %1$s 👋 Vi trenger fortsatt valget ditt for %2$s i ordre %3$s.', 'lp-missing' ), esc_html( $name ), esc_html( $this->placeholders['{item_name}'] ), esc_html( $this->object->get_order_number() ) ); ?></p>
+        <p><?php esc_html_e( 'Åpne lenken under for å fullføre valget ditt.', 'lp-missing' ); ?></p>
+        <p><?php esc_html_e( 'Du ser samtidig en enkel prisoversikt (mer, mindre eller samme pris).', 'lp-missing' ); ?></p>
         <p>
-            <a class="button" href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php esc_html_e( 'Review options', 'lp-missing' ); ?></a>
+            <a class="button" href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php esc_html_e( 'Åpne valgside', 'lp-missing' ); ?></a>
         </p>
-        <p><?php esc_html_e( 'If the button does not work, copy and paste this link into your browser:', 'lp-missing' ); ?><br />
+        <p><?php esc_html_e( 'Hvis knappen ikke virker, kopier denne lenken inn i nettleseren:', 'lp-missing' ); ?><br />
             <a href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php echo esc_html( $this->placeholders['{magic_link}'] ); ?></a>
         </p>
         <?php
@@ -2107,9 +2174,11 @@ class LP_Missing_Product_Reminder_Email extends WC_Email {
     }
 
     public function get_content_plain() {
+        $name = LP_Missing_Product_Handler::get_customer_first_name( $this->object );
         $lines = array(
-            sprintf( __( 'We still need your decision for %1$s on order %2$s.', 'lp-missing' ), $this->placeholders['{item_name}'], $this->object->get_order_number() ),
-            __( 'Please review your options using the secure link below.', 'lp-missing' ),
+            sprintf( __( 'Hei %1$s! Vi trenger fortsatt valget ditt for %2$s i ordre %3$s.', 'lp-missing' ), $name, $this->placeholders['{item_name}'], $this->object->get_order_number() ),
+            __( 'Bruk lenken under for å velge alternativ.', 'lp-missing' ),
+            __( 'Lenken viser tydelig om alternativet blir dyrere, billigere eller lik pris.', 'lp-missing' ),
             $this->placeholders['{magic_link}'],
         );
         return implode( "\n\n", $lines );
