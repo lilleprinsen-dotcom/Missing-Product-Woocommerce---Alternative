@@ -731,25 +731,10 @@ JS;
         $alt_unit_incl        = floatval( $pricing_snapshot['alternative_unit_incl'] );
         $final_delta          = wc_format_decimal( $pricing_snapshot['delta_total_incl'], wc_get_price_decimals() );
 
-        $line_result = '';
-        if ( 'replace' === $mode ) {
-            $new_qty = max( 0, $item->get_quantity() - $qty_alt );
-            $item->set_quantity( $new_qty );
-            if ( $new_qty > 0 ) {
-                $item->save();
-                $line_result = __( 'original line quantity reduced', 'lp-missing' );
-            } else {
-                $line_result = __( 'original line removed', 'lp-missing' );
-            }
-        } else {
-            self::reduce_original_line_totals_for_added_alternative( $item, $qty_alt );
-            $item->save();
-            $line_result = __( 'original line totals reduced', 'lp-missing' );
-        }
-
         $alt_item_id = $order->add_product( $alt_product, $qty_alt );
         if ( ! $alt_item_id ) {
-            return array( 'status' => 'error', 'message' => __( 'Could not add selected alternative to the order.', 'lp-missing' ) );
+            $order->add_order_note( __( 'Could not apply customer-selected alternative: adding the alternative order line failed, so no changes were saved.', 'lp-missing' ) );
+            return array( 'status' => 'error', 'message' => __( 'Could not add selected alternative to the order. No order changes were made.', 'lp-missing' ) );
         }
 
         $alt_item = $order->get_item( $alt_item_id );
@@ -760,7 +745,34 @@ JS;
             $alt_item->save();
         }
 
+        $original_state = self::capture_order_item_state( $item );
+        $line_result    = '';
+        $line_update    = self::reduce_line_quantity_and_totals( $item, $qty_alt );
+        if ( is_wp_error( $line_update ) ) {
+            $order->remove_item( $alt_item_id );
+            $order->save();
+            $order->add_order_note( sprintf( __( 'Could not apply customer-selected alternative: %s. Alternative line rollback completed.', 'lp-missing' ), $line_update->get_error_message() ) );
+            return array( 'status' => 'error', 'message' => __( 'Could not apply the alternative safely. The order was rolled back to its previous state.', 'lp-missing' ) );
+        }
+
+        $new_qty = isset( $line_update['new_qty'] ) ? absint( $line_update['new_qty'] ) : 0;
+        if ( 'replace' === $mode ) {
+            $line_result = $new_qty > 0 ? __( 'original line quantity and totals reduced proportionally', 'lp-missing' ) : __( 'original line fully replaced and removed', 'lp-missing' );
+        } else {
+            $line_result = __( 'add mode normalized: original line quantity and totals reduced by applied missing quantity, and alternative kept as a separate line', 'lp-missing' );
+        }
+
+        $item->save();
+
         $surcharge_result = self::handle_price_difference_surcharge( $order, $final_delta, $original_name, $alt_product->get_name(), $qty_alt, $pricing_snapshot, $price_handling_mode );
+        if ( ! empty( $surcharge_result['error'] ) ) {
+            self::restore_order_item_state( $item, $original_state );
+            $item->save();
+            $order->remove_item( $alt_item_id );
+            $order->save();
+            $order->add_order_note( sprintf( __( 'Could not apply customer-selected alternative because surcharge processing failed: %s. All changes rolled back.', 'lp-missing' ), $surcharge_result['error'] ) );
+            return array( 'status' => 'error', 'message' => __( 'Could not apply the alternative because surcharge handling failed. The order was rolled back.', 'lp-missing' ) );
+        }
 
         $new_data = $data;
         $fully_resolved = $remaining_missing_qty < 1;
@@ -784,7 +796,7 @@ JS;
                 $order->add_order_note( sprintf( __( 'Inventory decreased by %1$s for selected alternative %2$s when applying customer decision.', 'lp-missing' ), $qty_alt, $alt_product->get_name() ) );
             }
         }
-        if ( $fully_resolved && 'replace' === $mode && isset( $new_qty ) && $new_qty < 1 ) {
+        if ( $fully_resolved && isset( $new_qty ) && $new_qty < 1 ) {
             $order->remove_item( $item_id );
             $order->save();
         } else {
@@ -826,15 +838,14 @@ JS;
         $qty_remove = $previous_missing_qty ? $previous_missing_qty : $item->get_quantity();
         $qty_remove = max( 1, min( $qty_remove, $item->get_quantity() ) );
 
-        $unit_price    = self::get_item_unit_price_incl_tax( $item );
         $line_result   = __( 'line unchanged', 'lp-missing' );
 
         if ( 'reduce' === $mode ) {
-            $new_qty = max( 0, $item->get_quantity() - $qty_remove );
-            $item->set_quantity( $new_qty );
+            $line_update = self::reduce_line_quantity_and_totals( $item, $qty_remove );
+            $new_qty = is_array( $line_update ) && isset( $line_update['new_qty'] ) ? absint( $line_update['new_qty'] ) : 0;
             if ( $new_qty > 0 ) {
                 $item->save();
-                $line_result = __( 'line quantity reduced', 'lp-missing' );
+                $line_result = __( 'line quantity and totals reduced proportionally', 'lp-missing' );
             } else {
                 $line_result = __( 'line removed', 'lp-missing' );
             }
@@ -842,12 +853,30 @@ JS;
         }
 
         if ( 'refund' === $mode ) {
-            $refund_amount = wc_format_decimal( $unit_price * $qty_remove, wc_get_price_decimals() );
+            $qty_current = max( 1, absint( $item->get_quantity() ) );
+            $ratio       = min( 1, $qty_remove / $qty_current );
+            $refund_excl = wc_format_decimal( floatval( $item->get_total() ) * $ratio, wc_get_price_decimals() );
+            $refund_tax_total = wc_format_decimal( floatval( $item->get_total_tax() ) * $ratio, wc_get_price_decimals() );
+            $refund_amount = wc_format_decimal( $refund_excl + $refund_tax_total, wc_get_price_decimals() );
+            $refund_taxes = array();
+            $line_taxes = $item->get_taxes();
+            if ( ! empty( $line_taxes['total'] ) && is_array( $line_taxes['total'] ) ) {
+                foreach ( $line_taxes['total'] as $rate_id => $tax_amount ) {
+                    $refund_taxes[ $rate_id ] = wc_format_decimal( floatval( $tax_amount ) * $ratio, wc_get_price_decimals() );
+                }
+            }
             if ( $refund_amount > 0 ) {
                 $refund = wc_create_refund( array(
                     'amount'         => $refund_amount,
                     'reason'         => __( 'Customer approved deletion of missing items.', 'lp-missing' ),
                     'order_id'       => $order->get_id(),
+                    'line_items'     => array(
+                        $item_id => array(
+                            'qty'          => $qty_remove,
+                            'refund_total' => $refund_excl,
+                            'refund_tax'   => $refund_taxes,
+                        ),
+                    ),
                     'refund_payment' => false,
                 ) );
                 if ( is_wp_error( $refund ) ) {
@@ -916,18 +945,65 @@ JS;
         $item->set_total_tax( $line_total_tax );
     }
 
-    protected static function reduce_original_line_totals_for_added_alternative( $item, $qty_alt ) {
-        $qty_alt            = max( 1, absint( $qty_alt ) );
-        $original_unit_excl = self::get_item_unit_price_excl_tax( $item );
-        $original_unit_tax  = max( 0, self::get_item_unit_price_incl_tax( $item ) - $original_unit_excl );
+    protected static function capture_order_item_state( $item ) {
+        return array(
+            'quantity'     => absint( $item->get_quantity() ),
+            'subtotal'     => floatval( $item->get_subtotal() ),
+            'total'        => floatval( $item->get_total() ),
+            'subtotal_tax' => floatval( $item->get_subtotal_tax() ),
+            'total_tax'    => floatval( $item->get_total_tax() ),
+            'taxes'        => $item->get_taxes(),
+        );
+    }
 
-        $new_total_excl = max( 0, floatval( $item->get_total() ) - ( $original_unit_excl * $qty_alt ) );
-        $new_total_tax  = max( 0, floatval( $item->get_total_tax() ) - ( $original_unit_tax * $qty_alt ) );
+    protected static function restore_order_item_state( $item, $state ) {
+        if ( ! is_array( $state ) ) {
+            return;
+        }
+        $item->set_quantity( isset( $state['quantity'] ) ? absint( $state['quantity'] ) : $item->get_quantity() );
+        $item->set_subtotal( wc_format_decimal( isset( $state['subtotal'] ) ? $state['subtotal'] : $item->get_subtotal(), wc_get_price_decimals() ) );
+        $item->set_total( wc_format_decimal( isset( $state['total'] ) ? $state['total'] : $item->get_total(), wc_get_price_decimals() ) );
+        $item->set_subtotal_tax( wc_format_decimal( isset( $state['subtotal_tax'] ) ? $state['subtotal_tax'] : $item->get_subtotal_tax(), wc_get_price_decimals() ) );
+        $item->set_total_tax( wc_format_decimal( isset( $state['total_tax'] ) ? $state['total_tax'] : $item->get_total_tax(), wc_get_price_decimals() ) );
+        if ( isset( $state['taxes'] ) && is_array( $state['taxes'] ) ) {
+            $item->set_taxes( $state['taxes'] );
+        }
+    }
 
-        $item->set_total( wc_format_decimal( $new_total_excl, wc_get_price_decimals() ) );
-        $item->set_subtotal( wc_format_decimal( max( 0, floatval( $item->get_subtotal() ) - ( $original_unit_excl * $qty_alt ) ), wc_get_price_decimals() ) );
-        $item->set_total_tax( wc_format_decimal( $new_total_tax, wc_get_price_decimals() ) );
-        $item->set_subtotal_tax( wc_format_decimal( max( 0, floatval( $item->get_subtotal_tax() ) - ( $original_unit_tax * $qty_alt ) ), wc_get_price_decimals() ) );
+    protected static function reduce_line_quantity_and_totals( $item, $qty_reduce ) {
+        $old_qty = absint( $item->get_quantity() );
+        if ( $old_qty < 1 ) {
+            return new WP_Error( 'lp_missing_invalid_line_qty', __( 'Cannot reduce an order line with zero quantity.', 'lp-missing' ) );
+        }
+
+        $qty_reduce = max( 1, absint( $qty_reduce ) );
+        $qty_reduce = min( $qty_reduce, $old_qty );
+        $new_qty    = max( 0, $old_qty - $qty_reduce );
+        $ratio      = $old_qty > 0 ? ( $new_qty / $old_qty ) : 0;
+
+        $item->set_quantity( $new_qty );
+        $item->set_subtotal( wc_format_decimal( floatval( $item->get_subtotal() ) * $ratio, wc_get_price_decimals() ) );
+        $item->set_total( wc_format_decimal( floatval( $item->get_total() ) * $ratio, wc_get_price_decimals() ) );
+        $item->set_subtotal_tax( wc_format_decimal( floatval( $item->get_subtotal_tax() ) * $ratio, wc_get_price_decimals() ) );
+        $item->set_total_tax( wc_format_decimal( floatval( $item->get_total_tax() ) * $ratio, wc_get_price_decimals() ) );
+
+        $taxes = $item->get_taxes();
+        if ( is_array( $taxes ) ) {
+            foreach ( array( 'subtotal', 'total' ) as $tax_type ) {
+                if ( empty( $taxes[ $tax_type ] ) || ! is_array( $taxes[ $tax_type ] ) ) {
+                    continue;
+                }
+                foreach ( $taxes[ $tax_type ] as $rate_id => $amount ) {
+                    $taxes[ $tax_type ][ $rate_id ] = wc_format_decimal( floatval( $amount ) * $ratio, wc_get_price_decimals() );
+                }
+            }
+            $item->set_taxes( $taxes );
+        }
+
+        return array(
+            'old_qty' => $old_qty,
+            'new_qty' => $new_qty,
+        );
     }
 
     protected static function get_product_unit_price_incl_tax( $product ) {
@@ -936,6 +1012,63 @@ JS;
 
     protected static function get_product_unit_price_excl_tax( $product ) {
         return (float) wc_get_price_excluding_tax( $product, array( 'qty' => 1 ) );
+    }
+
+    protected static function get_order_tax_location( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return array();
+        }
+
+        $country  = $order->get_shipping_country();
+        $state    = $order->get_shipping_state();
+        $postcode = $order->get_shipping_postcode();
+        $city     = $order->get_shipping_city();
+
+        if ( empty( $country ) ) {
+            $country  = $order->get_billing_country();
+            $state    = $order->get_billing_state();
+            $postcode = $order->get_billing_postcode();
+            $city     = $order->get_billing_city();
+        }
+
+        return array(
+            'country'  => $country,
+            'state'    => $state,
+            'postcode' => $postcode,
+            'city'     => $city,
+        );
+    }
+
+    protected static function get_product_unit_prices_for_order_context( $order, $product ) {
+        if ( ! $product ) {
+            return array(
+                'excl' => 0.0,
+                'incl' => 0.0,
+            );
+        }
+
+        $unit_excl = (float) wc_get_price_excluding_tax( $product, array( 'qty' => 1 ) );
+        $unit_incl = $unit_excl;
+
+        if ( wc_tax_enabled() && $product->is_taxable() ) {
+            $location = self::get_order_tax_location( $order );
+            $rates    = WC_Tax::find_rates(
+                array(
+                    'country'   => isset( $location['country'] ) ? $location['country'] : '',
+                    'state'     => isset( $location['state'] ) ? $location['state'] : '',
+                    'postcode'  => isset( $location['postcode'] ) ? $location['postcode'] : '',
+                    'city'      => isset( $location['city'] ) ? $location['city'] : '',
+                    'tax_class' => $product->get_tax_class(),
+                )
+            );
+            $taxes    = WC_Tax::calc_tax( $unit_excl, $rates, false );
+            $unit_incl = $unit_excl + array_sum( $taxes );
+        }
+
+        return array(
+            'excl' => $unit_excl,
+            'incl' => $unit_incl,
+        );
     }
 
     protected static function get_frozen_pricing_snapshot( $order, $item, $data, $alt_product = null, $qty = 0 ) {
@@ -963,6 +1096,7 @@ JS;
                     'delta_total_excl'    => 0,
                     'delta_total_tax'     => 0,
                     'original_context'    => 'frozen',
+                    'tax_context'         => 'order_context',
                     'frozen_at'           => absint( $data['decision_made_at'] ),
                 )
             );
@@ -972,10 +1106,11 @@ JS;
             $alt_product = wc_get_product( $data['selected_alt_id'] );
         }
 
-        $original_unit_incl = self::get_item_unit_price_incl_tax( $item );
-        $original_unit_excl = self::get_item_unit_price_excl_tax( $item );
-        $alt_unit_incl      = $alt_product ? self::get_product_unit_price_incl_tax( $alt_product ) : 0.0;
-        $alt_unit_excl      = $alt_product ? self::get_product_unit_price_excl_tax( $alt_product ) : 0.0;
+        $original_unit_incl  = self::get_item_unit_price_incl_tax( $item );
+        $original_unit_excl  = self::get_item_unit_price_excl_tax( $item );
+        $alt_unit_prices     = self::get_product_unit_prices_for_order_context( $order, $alt_product );
+        $alt_unit_incl       = isset( $alt_unit_prices['incl'] ) ? floatval( $alt_unit_prices['incl'] ) : 0.0;
+        $alt_unit_excl       = isset( $alt_unit_prices['excl'] ) ? floatval( $alt_unit_prices['excl'] ) : 0.0;
         $delta_per_unit_incl = $alt_unit_incl - $original_unit_incl;
         $delta_per_unit_excl = $alt_unit_excl - $original_unit_excl;
         $delta_per_unit_tax  = $delta_per_unit_incl - $delta_per_unit_excl;
@@ -985,7 +1120,8 @@ JS;
             'selected_qty'          => $qty,
             // We compare in incl-tax terms so portal and surcharge totals match what customers see.
             'comparison_model'      => 'incl_tax',
-            'original_context'      => 'order_line_total',
+            'original_context'      => 'order_line_total_vs_order_tax_context_alternative',
+            'tax_context'           => 'order_context',
             'original_unit_incl'    => wc_format_decimal( $original_unit_incl, wc_get_price_decimals() ),
             'original_unit_excl'    => wc_format_decimal( $original_unit_excl, wc_get_price_decimals() ),
             'alternative_unit_incl' => wc_format_decimal( $alt_unit_incl, wc_get_price_decimals() ),
@@ -1030,6 +1166,7 @@ JS;
         $result = array(
             'mode'         => 'store_covers' === $price_handling_mode ? 'store_covers' : 'charge_customer',
             'summary_note' => '',
+            'error'        => '',
         );
 
         if ( $difference <= 0 ) {
@@ -1048,7 +1185,8 @@ JS;
 
         $surcharge_order = wc_create_order( array( 'customer_id' => $order->get_customer_id() ) );
         if ( is_wp_error( $surcharge_order ) ) {
-            $result['summary_note'] = sprintf( __( 'Could not create surcharge order for price delta: %s', 'lp-missing' ), $surcharge_order->get_error_message() );
+            $result['error'] = $surcharge_order->get_error_message();
+            $result['summary_note'] = sprintf( __( 'Could not create surcharge order for price delta: %s', 'lp-missing' ), $result['error'] );
             return $result;
         }
         $surcharge_order->set_parent_id( $order->get_id() );
@@ -1060,16 +1198,46 @@ JS;
         $fee->set_name( sprintf( __( 'Mellomlegg for alternativ vare på ordre #%s', 'lp-missing' ), $order->get_order_number() ) );
         $fee->set_amount( $delta_excl );
         $fee->set_total( $delta_excl );
-        // Make tax handling explicit so surcharge accounting follows the same frozen comparison model.
         $fee->set_tax_status( abs( (float) $delta_tax ) > 0 ? 'taxable' : 'none' );
         if ( abs( (float) $delta_tax ) > 0 ) {
-            $fee->set_total_tax( $delta_tax );
-            $fee->set_taxes(
+            $location = self::get_order_tax_location( $order );
+            $rates    = WC_Tax::find_rates(
                 array(
-                    'total'    => array( 0 => $delta_tax ),
-                    'subtotal' => array( 0 => $delta_tax ),
+                    'country'   => isset( $location['country'] ) ? $location['country'] : '',
+                    'state'     => isset( $location['state'] ) ? $location['state'] : '',
+                    'postcode'  => isset( $location['postcode'] ) ? $location['postcode'] : '',
+                    'city'      => isset( $location['city'] ) ? $location['city'] : '',
+                    'tax_class' => '',
                 )
             );
+            if ( ! empty( $rates ) ) {
+                $total_rates = 0.0;
+                foreach ( $rates as $rate ) {
+                    $total_rates += isset( $rate['rate'] ) ? floatval( $rate['rate'] ) : 0;
+                }
+                $tax_parts = array();
+                $remaining = floatval( $delta_tax );
+                $index     = 0;
+                $count     = count( $rates );
+                foreach ( $rates as $rate_id => $rate ) {
+                    $index++;
+                    if ( $index === $count ) {
+                        $part = $remaining;
+                    } else {
+                        $ratio = $total_rates > 0 ? ( floatval( $rate['rate'] ) / $total_rates ) : 0;
+                        $part  = round( floatval( $delta_tax ) * $ratio, wc_get_price_decimals() );
+                        $remaining -= $part;
+                    }
+                    $tax_parts[ $rate_id ] = wc_format_decimal( max( 0, $part ), wc_get_price_decimals() );
+                }
+                $fee->set_total_tax( $delta_tax );
+                $fee->set_taxes(
+                    array(
+                        'total'    => $tax_parts,
+                        'subtotal' => $tax_parts,
+                    )
+                );
+            }
         }
         $surcharge_order->add_item( $fee );
         $surcharge_order->calculate_totals( false );
@@ -1590,6 +1758,15 @@ JS;
         self::refresh_order_flags( $order );
     }
 
+    protected static function handle_post_item_update_housekeeping( $order, $item_id ) {
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        self::cancel_reminder_for_item( $order, $item_id );
+        self::refresh_order_attention_flag( $order );
+        self::schedule_cleanup_for_order( $order );
+    }
+
     public static function handle_item_updated( $order, $item_id, $new_data, $old_data ) {
         if ( ! $order instanceof WC_Order ) {
             return;
@@ -1597,6 +1774,7 @@ JS;
 
         $item = $order->get_item( $item_id );
         if ( ! $item ) {
+            self::handle_post_item_update_housekeeping( $order, $item_id );
             return;
         }
 
@@ -1642,6 +1820,13 @@ JS;
             $item->update_meta_data( self::META_KEY, $new_data );
             $item->save();
         }
+
+        // Re-arm reminders when a line remains open after a partial apply and no event is currently queued.
+        if ( $new_missing && ! self::has_customer_decision( $new_data ) && empty( $new_data['reminder_scheduled_for'] ) ) {
+            self::schedule_reminder_for_item( $order, $item_id );
+        }
+
+        self::refresh_order_attention_flag( $order );
     }
 
     public static function handle_scheduled_reminder( $order_id, $item_id ) {
