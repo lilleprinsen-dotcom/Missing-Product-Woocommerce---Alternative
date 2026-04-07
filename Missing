@@ -126,6 +126,7 @@ class LP_Missing_Product_Handler {
             'needs_attention' => false,
             'resolved_at'     => 0,
             'decision_made_at'=> 0,
+            'pricing_snapshot'=> array(),
         );
     }
 
@@ -151,6 +152,7 @@ class LP_Missing_Product_Handler {
         $data['needs_attention'] = (bool) $data['needs_attention'];
         $data['resolved_at'] = absint( isset( $data['resolved_at'] ) ? $data['resolved_at'] : 0 );
         $data['decision_made_at'] = absint( isset( $data['decision_made_at'] ) ? $data['decision_made_at'] : 0 );
+        $data['pricing_snapshot'] = is_array( $data['pricing_snapshot'] ) ? $data['pricing_snapshot'] : array();
 
         if ( 'alt_accepted' === $data['status'] ) {
             $data['status'] = 'alt_pending';
@@ -722,12 +724,12 @@ JS;
         $price_handling_mode  = isset( $settings['alt_price_handling'] ) ? $settings['alt_price_handling'] : 'charge_customer';
         $original_product     = $item->get_product();
         $original_name        = $original_product ? $original_product->get_name() : $item->get_name();
-        $original_unit_incl   = self::get_item_unit_price_incl_tax( $item );
-        $original_unit_excl   = self::get_item_unit_price_excl_tax( $item );
+        $pricing_snapshot     = self::get_frozen_pricing_snapshot( $order, $item, $data, $alt_product, $qty_alt );
+        $original_unit_incl   = floatval( $pricing_snapshot['original_unit_incl'] );
+        $original_unit_excl   = floatval( $pricing_snapshot['original_unit_excl'] );
         $original_unit_tax    = max( 0, $original_unit_incl - $original_unit_excl );
-        $alt_unit_incl        = self::get_product_unit_price_incl_tax( $alt_product );
-        $delta_per_unit       = $alt_unit_incl - $original_unit_incl;
-        $final_delta          = wc_format_decimal( $delta_per_unit * $qty_alt, wc_get_price_decimals() );
+        $alt_unit_incl        = floatval( $pricing_snapshot['alternative_unit_incl'] );
+        $final_delta          = wc_format_decimal( $pricing_snapshot['delta_total_incl'], wc_get_price_decimals() );
 
         $line_result = '';
         if ( 'replace' === $mode ) {
@@ -758,7 +760,7 @@ JS;
             $alt_item->save();
         }
 
-        $surcharge_result = self::handle_price_difference_surcharge( $order, $final_delta, $original_name, $alt_product->get_name(), $qty_alt, $original_unit_incl, $alt_unit_incl, $price_handling_mode );
+        $surcharge_result = self::handle_price_difference_surcharge( $order, $final_delta, $original_name, $alt_product->get_name(), $qty_alt, $pricing_snapshot, $price_handling_mode );
 
         $new_data = $data;
         $fully_resolved = $remaining_missing_qty < 1;
@@ -767,6 +769,7 @@ JS;
         $new_data['qty_missing'] = $remaining_missing_qty;
         $new_data['selected_alt_id'] = 0;
         $new_data['qty_alt'] = 0;
+        $new_data['pricing_snapshot'] = array();
         $new_data['needs_attention'] = false;
         $new_data['reminder_scheduled_for'] = 0;
         $new_data['decision_made_at'] = $fully_resolved ? time() : 0;
@@ -775,6 +778,12 @@ JS;
         $new_data['stock_locked_qty'] = isset( $new_data['stock_locked_qty'] ) ? absint( $new_data['stock_locked_qty'] ) : 0;
 
         self::maybe_adjust_stock( $item, $data, $new_data, $order );
+        if ( $alt_product->managing_stock() && $qty_alt > 0 ) {
+            wc_update_product_stock( $alt_product, $qty_alt, 'decrease' );
+            if ( 'yes' === $settings['enable_stock_notes'] ) {
+                $order->add_order_note( sprintf( __( 'Inventory decreased by %1$s for selected alternative %2$s when applying customer decision.', 'lp-missing' ), $qty_alt, $alt_product->get_name() ) );
+            }
+        }
         if ( $fully_resolved && 'replace' === $mode && isset( $new_qty ) && $new_qty < 1 ) {
             $order->remove_item( $item_id );
             $order->save();
@@ -790,7 +799,7 @@ JS;
         $note_parts[] = sprintf( __( 'Original product: %1$s. Alternative product: %2$s. Qty: %3$d.', 'lp-missing' ), $original_name, $alt_product->get_name(), $qty_alt );
         $note_parts[] = sprintf( __( 'Missing qty before apply: %1$d. Applied qty: %2$d. Remaining unresolved qty: %3$d.', 'lp-missing' ), $previous_missing_qty, $qty_alt, $remaining_missing_qty );
         $note_parts[] = sprintf( __( 'Line update result: %s.', 'lp-missing' ), $line_result );
-        $note_parts[] = sprintf( __( 'Original unit amount used for comparison: %1$s. Alternative unit amount used for comparison: %2$s.', 'lp-missing' ), wc_price( $original_unit_incl, array( 'currency' => $order->get_currency() ) ), wc_price( $alt_unit_incl, array( 'currency' => $order->get_currency() ) ) );
+        $note_parts[] = sprintf( __( 'Frozen unit amount used for comparison: original %1$s, alternative %2$s (captured at customer decision time).', 'lp-missing' ), wc_price( $original_unit_incl, array( 'currency' => $order->get_currency() ) ), wc_price( $alt_unit_incl, array( 'currency' => $order->get_currency() ) ) );
         $note_parts[] = sprintf( __( 'Final delta: %s.', 'lp-missing' ), wc_price( $final_delta, array( 'currency' => $order->get_currency() ) ) );
         $note_parts[] = sprintf( __( 'Price handling: %s.', 'lp-missing' ), 'store_covers' === $surcharge_result['mode'] ? __( 'Store covers any extra cost', 'lp-missing' ) : __( 'Customer is charged delta via separate surcharge order when positive', 'lp-missing' ) );
         if ( ! $fully_resolved ) {
@@ -852,6 +861,7 @@ JS;
         $new_data['status'] = 'delete_applied';
         $new_data['missing'] = false;
         $new_data['qty_missing'] = 0;
+        $new_data['pricing_snapshot'] = array();
         $new_data['needs_attention'] = false;
         $new_data['reminder_scheduled_for'] = 0;
         $new_data['resolved_at'] = time();
@@ -924,6 +934,72 @@ JS;
         return (float) wc_get_price_including_tax( $product, array( 'qty' => 1 ) );
     }
 
+    protected static function get_product_unit_price_excl_tax( $product ) {
+        return (float) wc_get_price_excluding_tax( $product, array( 'qty' => 1 ) );
+    }
+
+    protected static function get_frozen_pricing_snapshot( $order, $item, $data, $alt_product = null, $qty = 0 ) {
+        $qty                 = max( 1, absint( $qty ) );
+        $snapshot            = isset( $data['pricing_snapshot'] ) && is_array( $data['pricing_snapshot'] ) ? $data['pricing_snapshot'] : array();
+        $snapshot_alt_id     = isset( $snapshot['selected_alt_id'] ) ? absint( $snapshot['selected_alt_id'] ) : 0;
+        $snapshot_qty        = isset( $snapshot['selected_qty'] ) ? absint( $snapshot['selected_qty'] ) : 0;
+        $snapshot_is_usable  = ! empty( $snapshot['comparison_model'] ) && $snapshot_alt_id && $snapshot_qty;
+
+        if ( $snapshot_is_usable && $snapshot_alt_id === absint( isset( $data['selected_alt_id'] ) ? $data['selected_alt_id'] : 0 ) ) {
+            return wp_parse_args(
+                $snapshot,
+                array(
+                    'selected_alt_id'     => $snapshot_alt_id,
+                    'selected_qty'        => $snapshot_qty,
+                    'comparison_model'    => 'incl_tax',
+                    'original_unit_incl'  => 0,
+                    'original_unit_excl'  => 0,
+                    'alternative_unit_incl' => 0,
+                    'alternative_unit_excl' => 0,
+                    'delta_per_unit_incl' => 0,
+                    'delta_per_unit_excl' => 0,
+                    'delta_per_unit_tax'  => 0,
+                    'delta_total_incl'    => 0,
+                    'delta_total_excl'    => 0,
+                    'delta_total_tax'     => 0,
+                    'original_context'    => 'frozen',
+                    'frozen_at'           => absint( $data['decision_made_at'] ),
+                )
+            );
+        }
+
+        if ( ! $alt_product && ! empty( $data['selected_alt_id'] ) ) {
+            $alt_product = wc_get_product( $data['selected_alt_id'] );
+        }
+
+        $original_unit_incl = self::get_item_unit_price_incl_tax( $item );
+        $original_unit_excl = self::get_item_unit_price_excl_tax( $item );
+        $alt_unit_incl      = $alt_product ? self::get_product_unit_price_incl_tax( $alt_product ) : 0.0;
+        $alt_unit_excl      = $alt_product ? self::get_product_unit_price_excl_tax( $alt_product ) : 0.0;
+        $delta_per_unit_incl = $alt_unit_incl - $original_unit_incl;
+        $delta_per_unit_excl = $alt_unit_excl - $original_unit_excl;
+        $delta_per_unit_tax  = $delta_per_unit_incl - $delta_per_unit_excl;
+
+        return array(
+            'selected_alt_id'       => absint( isset( $data['selected_alt_id'] ) ? $data['selected_alt_id'] : 0 ),
+            'selected_qty'          => $qty,
+            // We compare in incl-tax terms so portal and surcharge totals match what customers see.
+            'comparison_model'      => 'incl_tax',
+            'original_context'      => 'order_line_total',
+            'original_unit_incl'    => wc_format_decimal( $original_unit_incl, wc_get_price_decimals() ),
+            'original_unit_excl'    => wc_format_decimal( $original_unit_excl, wc_get_price_decimals() ),
+            'alternative_unit_incl' => wc_format_decimal( $alt_unit_incl, wc_get_price_decimals() ),
+            'alternative_unit_excl' => wc_format_decimal( $alt_unit_excl, wc_get_price_decimals() ),
+            'delta_per_unit_incl'   => wc_format_decimal( $delta_per_unit_incl, wc_get_price_decimals() ),
+            'delta_per_unit_excl'   => wc_format_decimal( $delta_per_unit_excl, wc_get_price_decimals() ),
+            'delta_per_unit_tax'    => wc_format_decimal( $delta_per_unit_tax, wc_get_price_decimals() ),
+            'delta_total_incl'      => wc_format_decimal( $delta_per_unit_incl * $qty, wc_get_price_decimals() ),
+            'delta_total_excl'      => wc_format_decimal( $delta_per_unit_excl * $qty, wc_get_price_decimals() ),
+            'delta_total_tax'       => wc_format_decimal( $delta_per_unit_tax * $qty, wc_get_price_decimals() ),
+            'frozen_at'             => time(),
+        );
+    }
+
     public static function get_customer_first_name( $order ) {
         $name = trim( (string) $order->get_billing_first_name() );
         return '' === $name ? __( 'der', 'lp-missing' ) : $name;
@@ -931,10 +1007,12 @@ JS;
 
     protected static function get_alternative_price_delta( $order, $item, $alt_product, $qty = 1 ) {
         $qty = max( 1, absint( $qty ) );
-        $original_unit = self::get_item_unit_price_incl_tax( $item );
-        $alt_unit      = self::get_product_unit_price_incl_tax( $alt_product );
-        $delta_unit    = $alt_unit - $original_unit;
-        $delta_total   = $delta_unit * $qty;
+        $data          = self::get_item_data( $item );
+        $preview_data  = $data;
+        $preview_data['selected_alt_id'] = $alt_product->get_id();
+        $snapshot      = self::get_frozen_pricing_snapshot( $order, $item, $preview_data, $alt_product, $qty );
+        $delta_unit    = floatval( $snapshot['delta_per_unit_incl'] );
+        $delta_total   = floatval( $snapshot['delta_total_incl'] );
 
         return array(
             'unit_delta_raw'  => $delta_unit,
@@ -945,8 +1023,10 @@ JS;
         );
     }
 
-    protected static function handle_price_difference_surcharge( $order, $difference, $original_product_name, $alt_product_name, $qty_alt, $original_unit, $alt_unit, $price_handling_mode = 'charge_customer' ) {
+    protected static function handle_price_difference_surcharge( $order, $difference, $original_product_name, $alt_product_name, $qty_alt, $pricing_snapshot, $price_handling_mode = 'charge_customer' ) {
         $difference = wc_format_decimal( $difference, wc_get_price_decimals() );
+        $delta_excl = isset( $pricing_snapshot['delta_total_excl'] ) ? wc_format_decimal( $pricing_snapshot['delta_total_excl'], wc_get_price_decimals() ) : $difference;
+        $delta_tax  = isset( $pricing_snapshot['delta_total_tax'] ) ? wc_format_decimal( $pricing_snapshot['delta_total_tax'], wc_get_price_decimals() ) : 0;
         $result = array(
             'mode'         => 'store_covers' === $price_handling_mode ? 'store_covers' : 'charge_customer',
             'summary_note' => '',
@@ -978,10 +1058,21 @@ JS;
 
         $fee = new WC_Order_Item_Fee();
         $fee->set_name( sprintf( __( 'Mellomlegg for alternativ vare på ordre #%s', 'lp-missing' ), $order->get_order_number() ) );
-        $fee->set_amount( $difference );
-        $fee->set_total( $difference );
+        $fee->set_amount( $delta_excl );
+        $fee->set_total( $delta_excl );
+        // Make tax handling explicit so surcharge accounting follows the same frozen comparison model.
+        $fee->set_tax_status( abs( (float) $delta_tax ) > 0 ? 'taxable' : 'none' );
+        if ( abs( (float) $delta_tax ) > 0 ) {
+            $fee->set_total_tax( $delta_tax );
+            $fee->set_taxes(
+                array(
+                    'total'    => array( 0 => $delta_tax ),
+                    'subtotal' => array( 0 => $delta_tax ),
+                )
+            );
+        }
         $surcharge_order->add_item( $fee );
-        $surcharge_order->calculate_totals( true );
+        $surcharge_order->calculate_totals( false );
         $surcharge_order->set_status( 'pending' );
         $surcharge_order->add_order_note(
             sprintf(
@@ -990,8 +1081,8 @@ JS;
                 $qty_alt,
                 $order->get_order_number(),
                 $original_product_name,
-                wc_price( $original_unit, array( 'currency' => $order->get_currency() ) ),
-                wc_price( $alt_unit, array( 'currency' => $order->get_currency() ) ),
+                wc_price( isset( $pricing_snapshot['original_unit_incl'] ) ? $pricing_snapshot['original_unit_incl'] : 0, array( 'currency' => $order->get_currency() ) ),
+                wc_price( isset( $pricing_snapshot['alternative_unit_incl'] ) ? $pricing_snapshot['alternative_unit_incl'] : 0, array( 'currency' => $order->get_currency() ) ),
                 wc_price( $difference, array( 'currency' => $order->get_currency() ) )
             )
         );
@@ -1150,7 +1241,7 @@ JS;
                                     <label><input type="radio" name="lp_alt_price_handling" value="charge_customer" <?php checked( 'charge_customer', $settings['alt_price_handling'] ); ?> /> <?php esc_html_e( 'Charge the customer for more expensive alternatives.', 'lp-missing' ); ?></label><br />
                                     <label><input type="radio" name="lp_alt_price_handling" value="store_covers" <?php checked( 'store_covers', $settings['alt_price_handling'] ); ?> /> <?php esc_html_e( 'Store covers the extra cost (no charge to customer).', 'lp-missing' ); ?></label>
                                 </fieldset>
-                                <p class="description"><?php esc_html_e( 'Controls whether a surcharge order is raised when the chosen alternative costs more than the original item.', 'lp-missing' ); ?></p>
+                                <p class="description"><?php esc_html_e( 'Controls whether a separate surcharge order is raised when the chosen alternative costs more than the original item. Comparison values are frozen when the customer makes their choice.', 'lp-missing' ); ?></p>
                             </td>
                         </tr>
                         <tr>
@@ -1226,6 +1317,7 @@ JS;
                 $new_data['status'] = 'cleared';
                 $new_data['selected_alt_id'] = 0;
                 $new_data['qty_alt'] = 0;
+                $new_data['pricing_snapshot'] = array();
                 $new_data['first_missing_at'] = 0;
                 $new_data['reminder_count'] = 0;
                 $new_data['last_reminder_at'] = 0;
@@ -1841,18 +1933,25 @@ JS;
             if ( ! in_array( $alt_id, $existing['alternatives'], true ) ) {
                 return array( 'message' => __( 'Dette alternativet kan ikke velges.', 'lp-missing' ), 'status' => 'error' );
             }
+            $alt_product = wc_get_product( $alt_id );
+            if ( ! $alt_product ) {
+                return array( 'message' => __( 'Dette alternativet er ikke lenger tilgjengelig.', 'lp-missing' ), 'status' => 'error' );
+            }
             $new['status'] = 'alt_pending';
             $new['selected_alt_id'] = $alt_id;
             $new['qty_alt'] = $qty_alt;
+            $new['pricing_snapshot'] = self::get_frozen_pricing_snapshot( $order, $item, $new, $alt_product, $qty_alt );
         } elseif ( 'decline_all' === $action ) {
             $new['status'] = 'declined';
             $new['selected_alt_id'] = 0;
             $new['qty_alt'] = 0;
+            $new['pricing_snapshot'] = array();
         } elseif ( 'accept_delete' === $action ) {
             if ( empty( $existing['propose_delete'] ) ) {
                 return array( 'message' => __( 'Sletting er ikke tilgjengelig for denne varen.', 'lp-missing' ), 'status' => 'error' );
             }
             $new['status'] = 'delete_pending';
+            $new['pricing_snapshot'] = array();
         } else {
             return array( 'message' => __( 'Ukjent handling.', 'lp-missing' ), 'status' => 'error' );
         }
@@ -1963,7 +2062,7 @@ JS;
             .lp-message-error{background:#fef2f2;border:1px solid #ef4444}
         </style>';
         echo '<div class="lp-missing-portal">';
-        echo '<div class="lp-portal-card"><strong>' . esc_html( sprintf( __( 'Hei %s 👋', 'lp-missing' ), $customer_name ) ) . '</strong><div class="lp-portal-muted">' . esc_html__( 'Vi hjelper deg å velge hva som skal skje med varer som mangler. Velg det som passer best for deg.', 'lp-missing' ) . '</div></div>';
+        echo '<div class="lp-portal-card"><strong>' . esc_html( sprintf( __( 'Hei %s 👋', 'lp-missing' ), $customer_name ) ) . '</strong><div class="lp-portal-muted">' . esc_html__( 'Vi hjelper deg å velge hva som skal skje med varer som mangler. Prisforskjell fryses når du velger, slik at den ikke endres senere.', 'lp-missing' ) . '</div></div>';
         foreach ( $missing_items as $item_id => $payload ) {
             $item = $payload['item'];
             $data = $payload['data'];
@@ -1985,7 +2084,7 @@ JS;
                     $delta = self::get_alternative_price_delta( $order, $item, $alt_product, $data['qty_missing'] );
                     $delta_text = __( 'Samme pris som original vare', 'lp-missing' );
                     if ( 'up' === $delta['direction'] ) {
-                        $delta_text = sprintf( __( 'Koster %1$s mer per stk (%2$s mer for %3$s stk)', 'lp-missing' ), $delta['unit_delta'], $delta['total_delta'], $data['qty_missing'] );
+                        $delta_text = sprintf( __( 'Koster %1$s mer per stk (%2$s mer for %3$s stk). Hvis butikken ikke dekker mellomlegget, faktureres dette i en separat ordre.', 'lp-missing' ), $delta['unit_delta'], $delta['total_delta'], $data['qty_missing'] );
                     } elseif ( 'down' === $delta['direction'] ) {
                         $delta_text = sprintf( __( 'Koster %1$s mindre per stk (%2$s mindre for %3$s stk)', 'lp-missing' ), wc_price( abs( $delta['unit_delta_raw'] ), array( 'currency' => $order->get_currency() ) ), wc_price( abs( $delta['total_delta_raw'] ), array( 'currency' => $order->get_currency() ) ), $data['qty_missing'] );
                     }
@@ -2010,7 +2109,7 @@ JS;
                         $delta = self::get_alternative_price_delta( $order, $item, $alt_product, $selected_qty );
                         echo '<div><em>' . esc_html__( 'Du valgte:', 'lp-missing' ) . '</em> ' . esc_html( $alt_product->get_name() ) . ' &times; ' . esc_html( $selected_qty ) . '</div>';
                         if ( 'up' === $delta['direction'] ) {
-                            echo '<div class="lp-portal-muted">' . esc_html( sprintf( __( 'Pris: %s mer totalt.', 'lp-missing' ), $delta['total_delta'] ) ) . '</div>';
+                            echo '<div class="lp-portal-muted">' . esc_html( sprintf( __( 'Pris låst ved valg: %s mer totalt. Butikken kan dekke mellomlegget, ellers faktureres det i separat ordre.', 'lp-missing' ), $delta['total_delta'] ) ) . '</div>';
                         } elseif ( 'down' === $delta['direction'] ) {
                             echo '<div class="lp-portal-muted">' . esc_html( sprintf( __( 'Pris: %s mindre totalt.', 'lp-missing' ), wc_price( abs( $delta['total_delta_raw'] ), array( 'currency' => $order->get_currency() ) ) ) ) . '</div>';
                         } else {
@@ -2047,6 +2146,7 @@ JS;
                     }
                     echo '</select></label> ';
                     echo '<label>' . esc_html__( 'Antall', 'lp-missing' ) . ' <input type="number" min="1" max="' . esc_attr( $data['qty_missing'] ) . '" name="lp_missing_alt_qty" value="' . esc_attr( $data['qty_missing'] ) . '" style="width:70px;" /></label> ';
+                    echo '<div class="lp-portal-muted">' . esc_html__( 'Du kan velge deler av manglende antall nå. Resten blir stående åpen til vi får nytt valg.', 'lp-missing' ) . '</div>';
                     echo '<button class="lp-btn" type="submit" name="lp_missing_action" value="accept_alt">' . esc_html__( '✅ Velg dette alternativet', 'lp-missing' ) . '</button>';
                     echo '</div>';
                 }
