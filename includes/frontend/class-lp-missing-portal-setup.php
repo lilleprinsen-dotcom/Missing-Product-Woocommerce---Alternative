@@ -16,7 +16,7 @@ class LP_Missing_Portal_Setup {
     /**
      * Upgrade step key. Sorts right after the 1.2.0 step, so installs coming from 1.1.x run it in the same upgrade.
      */
-    const UPGRADE_VERSION = '1.2.0.1';
+    const UPGRADE_VERSION = '1.2.0.2';
 
     const OPTION_PENDING    = 'lp_missing_portal_page_pending';
     const OPTION_SETUP_DONE = 'lp_missing_portal_setup_done';

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Missing Product WooCommerce Alternative
  * Description: Handles missing items, alternatives, and customer responses for WooCommerce orders.
- * Version: 1.2.0
+ * Version: 1.3.0
  * Text Domain: lp-missing
  * Requires Plugins: woocommerce
  * Requires PHP: 7.4
@@ -64,10 +64,16 @@ add_action( 'plugins_loaded', 'lp_missing_bootstrap_plugin', 20 );
 // Creates the "Velg erstatning" customer portal page when no valid portal page is configured.
 register_activation_hook( __FILE__, array( 'LP_Missing_Portal_Setup', 'activate' ) );
 
-// The daily cleanup is a recurring event; without this it keeps being re-armed after deactivation.
+// Cancel the plugin's background jobs (Action Scheduler group "lp-missing" and any WP-Cron leftovers).
 register_deactivation_hook(
     __FILE__,
     function() {
-        wp_clear_scheduled_hook( 'lp_missing_daily_cleanup' );
+        if ( class_exists( 'LP_Missing_Scheduler' ) && class_exists( 'LP_Missing_Plugin' ) ) {
+            LP_Missing_Scheduler::unschedule_all();
+            return;
+        }
+        foreach ( array( 'lp_missing_order_reminder', 'lp_missing_order_deadline', 'lp_missing_cleanup_order', 'lp_missing_daily_cleanup', 'lp_missing_send_reminder' ) as $hook ) {
+            wp_unschedule_hook( $hook );
+        }
     }
 );

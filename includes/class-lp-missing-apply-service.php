@@ -10,7 +10,77 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class LP_Missing_Apply_Service {
-    public static function apply_alternative_decision( $order, $item, $item_id, $data, $mode ) {
+    /** @var array|null Customer notes collected during an automatic run: one note per order instead of one per line. */
+    protected static $note_buffer = null;
+
+    /**
+     * Apply the customer's chosen alternative. $mode: 'replace' (shrink the original line) or 'add' (keep it).
+     * $context: 'manual' (staff) or 'automatic'. Callers hold the per-order apply lock.
+     *
+     * @return array status ('success'|'error'), message, and on success details (qty, remaining, delta, ...).
+     */
+    public static function apply_alternative_decision( $order, $item, $item_id, $data, $mode, $context = 'manual' ) {
+        return self::run_apply( 'alternative', $order, $item, $item_id, $data, $mode, $context );
+    }
+
+    /**
+     * Remove the missing quantity. $mode: 'refund' (record a refund, line kept) or 'reduce' (shrink/remove the line).
+     * $context 'automatic' (decision deadline) may also remove lines still waiting for the customer.
+     */
+    public static function apply_delete_decision( $order, $item, $item_id, $data, $mode, $context = 'manual' ) {
+        return self::run_apply( 'delete', $order, $item, $item_id, $data, $mode, $context );
+    }
+
+    protected static function run_apply( $type, $order, $item, $item_id, $data, $mode, $context ) {
+        $context = 'automatic' === $context ? 'automatic' : 'manual';
+        /**
+         * Fires before a decision is applied to an order.
+         *
+         * @param WC_Order $order   Order.
+         * @param int      $item_id Line item ID.
+         * @param string   $type    'alternative' or 'delete'.
+         * @param string   $mode    'replace'|'add' (alternative) or 'refund'|'reduce' (delete).
+         * @param null     $result  Always null here (see lp_missing_after_apply_decision).
+         * @param string   $context 'manual' or 'automatic'.
+         */
+        do_action( 'lp_missing_before_apply_decision', $order, $item_id, $type, $mode, null, $context );
+
+        if ( 'alternative' === $type ) {
+            $result = self::do_apply_alternative( $order, $item, $item_id, $data, $mode, $context );
+        } else {
+            $result = self::do_apply_delete( $order, $item, $item_id, $data, $mode, $context );
+        }
+
+        $log = array(
+            'order_id' => $order->get_id(),
+            'item_id'  => absint( $item_id ),
+            'type'     => $type,
+            'mode'     => $mode,
+            'context'  => $context,
+        );
+        if ( 'success' === $result['status'] ) {
+            LP_Missing_Logger::info( 'Decision applied.', $log );
+        } else {
+            LP_Missing_Logger::warning( 'Decision could not be applied.', $log + array( 'reason' => $result['message'] ) );
+        }
+
+        $fresh = has_action( 'lp_missing_after_apply_decision' ) ? wc_get_order( $order->get_id() ) : null;
+        /**
+         * Fires after a decision was applied (or failed to apply).
+         *
+         * @param WC_Order $order   Order (reloaded).
+         * @param int      $item_id Line item ID (the line may be gone after a full replace/reduce).
+         * @param string   $type    'alternative' or 'delete'.
+         * @param string   $mode    'replace'|'add' or 'refund'|'reduce'.
+         * @param array    $result  status ('success'|'error'), message and details.
+         * @param string   $context 'manual' or 'automatic'.
+         */
+        do_action( 'lp_missing_after_apply_decision', $fresh instanceof WC_Order ? $fresh : $order, $item_id, $type, $mode, $result, $context );
+
+        return $result;
+    }
+
+    protected static function do_apply_alternative( $order, $item, $item_id, $data, $mode, $context ) {
         if ( 'alt_pending' !== $data['status'] || empty( $data['selected_alt_id'] ) ) {
             return array( 'status' => 'error', 'message' => __( 'No customer-approved alternative to apply.', 'lp-missing' ) );
         }
@@ -36,7 +106,17 @@ class LP_Missing_Apply_Service {
         $pricing_snapshot     = LP_Missing_Pricing::scale_pricing_snapshot( LP_Missing_Pricing::get_frozen_pricing_snapshot( $order, $item, $data, $alt_product, $qty_alt ), $qty_alt );
         $original_unit_incl   = floatval( $pricing_snapshot['original_unit_incl'] );
         $alt_unit_incl        = floatval( $pricing_snapshot['alternative_unit_incl'] );
-        $final_delta          = wc_format_decimal( $pricing_snapshot['delta_total_incl'], wc_get_price_decimals() );
+        /**
+         * Filter the gross (incl. VAT) price difference used for the surcharge of an applied alternative.
+         *
+         * @param string     $delta            Frozen total difference for the applied quantity.
+         * @param WC_Order   $order            Order.
+         * @param WC_Order_Item_Product $item  Original line.
+         * @param WC_Product $alt_product      Alternative.
+         * @param int        $qty_alt          Applied quantity.
+         * @param array      $pricing_snapshot Frozen pricing snapshot (scaled to $qty_alt).
+         */
+        $final_delta          = wc_format_decimal( apply_filters( 'lp_missing_price_delta', $pricing_snapshot['delta_total_incl'], $order, $item, $alt_product, $qty_alt, $pricing_snapshot ), wc_get_price_decimals() );
 
         // Move exactly the original line's share (totals + per-rate taxes) for the applied quantity onto the alternative line,
         // so the order total and tax lines stay balanced; any price difference is handled separately below.
@@ -135,14 +215,24 @@ class LP_Missing_Apply_Service {
             $note_parts[] = $surcharge_result['summary_note'];
         }
         $order->add_order_note( implode( ' ', $note_parts ) );
+        self::add_customer_note( $order, self::describe_alternative_for_customer( $order, $original_name, $alt_product->get_name(), $qty_alt, $remaining_missing_qty, $final_delta, $surcharge_result ), $context );
 
         do_action( 'lp_missing_item_updated', $order, $item_id, $new_data, $data );
 
-        return array( 'status' => 'success', 'message' => $fully_resolved ? __( 'Alternative applied to the order.', 'lp-missing' ) : __( 'Alternative partially applied. Remaining missing quantity is still open.', 'lp-missing' ) );
+        return array(
+            'status'             => 'success',
+            'message'            => $fully_resolved ? __( 'Alternative applied to the order.', 'lp-missing' ) : __( 'Alternative partially applied. Remaining missing quantity is still open.', 'lp-missing' ),
+            'qty'                => $qty_alt,
+            'remaining'          => $remaining_missing_qty,
+            'delta'              => $final_delta,
+            'surcharge_order_id' => $surcharge_result['surcharge_order_id'],
+        );
     }
 
-    public static function apply_delete_decision( $order, $item, $item_id, $data, $mode ) {
-        if ( ! LP_Missing_Line::can_apply_deletion( $data ) ) {
+    protected static function do_apply_delete( $order, $item, $item_id, $data, $mode, $context ) {
+        // The decision deadline removes lines the customer never answered; staff need a customer decision (or escalation).
+        $allowed = LP_Missing_Line::can_apply_deletion( $data ) || ( 'automatic' === $context && LP_Missing_Line::is_awaiting_customer( $data ) );
+        if ( ! $allowed ) {
             return array( 'status' => 'error', 'message' => __( 'No customer-approved deletion to apply.', 'lp-missing' ) );
         }
 
@@ -155,6 +245,8 @@ class LP_Missing_Apply_Service {
         $qty_remove = max( 1, min( $qty_remove, $billable_qty ) );
 
         $share       = LP_Missing_Pricing::get_item_share( $item, $qty_remove );
+        $gross       = wc_format_decimal( (float) $share['total'] + array_sum( array_map( 'floatval', $share['taxes']['total'] ) ), wc_get_price_decimals() );
+        $item_name   = $item->get_name();
         $new_qty     = $item->get_quantity();
         $line_result = __( 'line unchanged', 'lp-missing' );
         $stock_baseline = $data;
@@ -165,7 +257,7 @@ class LP_Missing_Apply_Service {
             if ( $refund_amount > 0 ) {
                 $refund = wc_create_refund( array(
                     'amount'         => $refund_amount,
-                    'reason'         => __( 'Customer approved deletion of missing items.', 'lp-missing' ),
+                    'reason'         => 'automatic' === $context ? __( 'Decision deadline passed: missing items removed.', 'lp-missing' ) : __( 'Customer approved deletion of missing items.', 'lp-missing' ),
                     'order_id'       => $order->get_id(),
                     'line_items'     => array(
                         $item_id => array(
@@ -230,18 +322,25 @@ class LP_Missing_Apply_Service {
             $line_result
         );
         $order->add_order_note( $note );
+        self::add_customer_note( $order, self::describe_deletion_for_customer( $order, $item_name, $qty_remove, $mode, $gross ), $context );
 
         do_action( 'lp_missing_item_updated', $order, $item_id, $new_data, $data );
 
-        return array( 'status' => 'success', 'message' => __( 'Deletion applied to the order.', 'lp-missing' ) );
+        return array(
+            'status'  => 'success',
+            'message' => __( 'Deletion applied to the order.', 'lp-missing' ),
+            'qty'     => $qty_remove,
+            'amount'  => $gross,
+        );
     }
 
     public static function handle_price_difference_surcharge( $order, $difference, $original_product_name, $alt_product, $qty_alt, $pricing_snapshot, $price_handling_mode = 'charge_customer' ) {
         $alt_product_name = $alt_product->get_name();
         $difference = wc_format_decimal( $difference, wc_get_price_decimals() );
         $result = array(
-            'mode'         => LP_Missing_Pricing::store_covers_difference( $difference ) ? 'store_covers' : 'charge_customer',
-            'summary_note' => '',
+            'mode'               => LP_Missing_Pricing::store_covers_difference( $difference ) ? 'store_covers' : 'charge_customer',
+            'summary_note'       => '',
+            'surcharge_order_id' => 0,
         );
 
         if ( $difference <= 0 ) {
@@ -302,7 +401,25 @@ class LP_Missing_Apply_Service {
         );
         $surcharge_order->save();
 
-        $result['summary_note'] = sprintf( __( 'Created surcharge order #%1$s for delta %2$s.', 'lp-missing' ), $surcharge_order->get_order_number(), wc_price( $difference, array( 'currency' => $order->get_currency() ) ) );
+        $result['surcharge_order_id'] = $surcharge_order->get_id();
+        $result['summary_note']       = sprintf( __( 'Created surcharge order #%1$s for delta %2$s.', 'lp-missing' ), $surcharge_order->get_order_number(), wc_price( $difference, array( 'currency' => $order->get_currency() ) ) );
+        LP_Missing_Logger::info(
+            'Surcharge order created.',
+            array(
+                'order_id'           => $order->get_id(),
+                'surcharge_order_id' => $surcharge_order->get_id(),
+                'amount'             => $difference,
+            )
+        );
+
+        /**
+         * Fires after the surcharge order for a dearer alternative was created (before its invoice is emailed).
+         *
+         * @param WC_Order $surcharge_order  The new pending order (child of $order).
+         * @param WC_Order $order            The original order.
+         * @param array    $pricing_snapshot Frozen pricing snapshot for the applied quantity.
+         */
+        do_action( 'lp_missing_surcharge_order_created', $surcharge_order, $order, $pricing_snapshot );
 
         $mailer = WC()->mailer();
         if ( $mailer && isset( $mailer->emails['WC_Email_Customer_Invoice'] ) ) {
@@ -310,5 +427,199 @@ class LP_Missing_Apply_Service {
         }
 
         return $result;
+    }
+
+    /* ------------------------------------------------------------------------------------------------------------
+     * Customer-visible order notes (S2): what changed, in plain Norwegian. They also reach the customer through
+     * WooCommerce's "Customer note" email.
+     * --------------------------------------------------------------------------------------------------------- */
+
+    protected static function add_customer_note( $order, $text, $context ) {
+        if ( is_array( self::$note_buffer ) ) {
+            self::$note_buffer[] = $text;
+            return;
+        }
+        if ( 'automatic' === $context ) {
+            $text = __( 'Vi fikk ikke svar fra deg innen fristen.', 'lp-missing' ) . ' ' . $text;
+        }
+        /**
+         * Filter the customer-visible order note added when a decision is applied ('' adds none).
+         *
+         * @param string   $text    Note text.
+         * @param WC_Order $order   Order.
+         * @param string   $context 'manual' or 'automatic'.
+         */
+        $text = (string) apply_filters( 'lp_missing_customer_note', $text, $order, $context );
+        if ( '' !== trim( $text ) ) {
+            $order->add_order_note( $text, 1, false );
+        }
+    }
+
+    public static function describe_alternative_for_customer( $order, $original_name, $alt_name, $qty, $remaining, $delta, $surcharge_result ) {
+        /* translators: 1: original product, 2: alternative product, 3: quantity */
+        $parts     = array( sprintf( __( 'Vi har byttet %1$s med %2$s (%3$d stk).', 'lp-missing' ), $original_name, $alt_name, $qty ) );
+        $threshold = 0.5 * pow( 10, -wc_get_price_decimals() );
+        $delta     = (float) $delta;
+        if ( ! empty( $surcharge_result['surcharge_order_id'] ) ) {
+            /* translators: %s: amount */
+            $parts[] = sprintf( __( 'Mellomlegg på %s faktureres i en egen ordre.', 'lp-missing' ), LP_Missing_Util::plain_price( $delta, $order ) );
+        } elseif ( $delta >= $threshold && 'store_covers' === $surcharge_result['mode'] ) {
+            /* translators: %s: amount */
+            $parts[] = sprintf( __( 'Prisforskjellen på %s dekker vi.', 'lp-missing' ), LP_Missing_Util::plain_price( $delta, $order ) );
+        } elseif ( $delta <= -$threshold ) {
+            $parts[] = __( 'Erstatningen er rimeligere, og ordresummen er uendret.', 'lp-missing' );
+        }
+        if ( $remaining > 0 ) {
+            /* translators: 1: quantity, 2: product name */
+            $parts[] = sprintf( __( 'Vi trenger fortsatt valget ditt for %1$d stk %2$s.', 'lp-missing' ), $remaining, $original_name );
+        }
+        return implode( ' ', $parts );
+    }
+
+    public static function describe_deletion_for_customer( $order, $item_name, $qty, $mode, $amount ) {
+        if ( 'refund' === $mode ) {
+            if ( (float) $amount > 0 ) {
+                /* translators: 1: product name, 2: quantity, 3: amount */
+                return sprintf( __( 'Vi har fjernet %1$s (%2$d stk) og refundert %3$s.', 'lp-missing' ), $item_name, $qty, LP_Missing_Util::plain_price( $amount, $order ) );
+            }
+            /* translators: 1: product name, 2: quantity */
+            return sprintf( __( 'Vi har fjernet %1$s (%2$d stk).', 'lp-missing' ), $item_name, $qty );
+        }
+        /* translators: 1: product name, 2: quantity, 3: amount */
+        return sprintf( __( 'Vi har fjernet %1$s (%2$d stk) fra ordren, og ordresummen er redusert med %3$s.', 'lp-missing' ), $item_name, $qty, LP_Missing_Util::plain_price( $amount, $order ) );
+    }
+
+    /* ------------------------------------------------------------------------------------------------------------
+     * Automatic path: the decision deadline (L11).
+     * --------------------------------------------------------------------------------------------------------- */
+
+    public static function is_deadline_due( $data, $now ) {
+        return LP_Missing_Line::is_awaiting_customer( $data )
+            && ! empty( $data['deadline_at'] )
+            && (int) $data['deadline_at'] <= $now
+            && empty( $data['auto_action_failed_at'] );
+    }
+
+    /**
+     * Apply the configured default action to every line of the order that still waits for the customer after its
+     * deadline. System path (no nonce/capability): takes the per-order apply lock and re-checks each line on a fresh
+     * copy of the order, so a decision is never applied twice. 'refund' becomes 'reduce' on unpaid orders.
+     *
+     * @return array status: 'locked' (try later), 'done' or 'nothing'; results: item_id => details.
+     */
+    public static function apply_due_deadline_actions( $order_id, $now = 0 ) {
+        $order_id = absint( $order_id );
+        $now      = $now ? (int) $now : time();
+        $results  = array();
+        if ( ! LP_Missing_Deadline::enabled() ) {
+            return array( 'status' => 'nothing', 'results' => $results );
+        }
+        if ( ! LP_Missing_Admin_Actions::acquire_apply_lock( $order_id ) ) {
+            return array( 'status' => 'locked', 'results' => $results );
+        }
+        self::$note_buffer = array();
+        try {
+            $order = wc_get_order( $order_id );
+            if ( ! $order instanceof WC_Order ) {
+                return array( 'status' => 'nothing', 'results' => $results );
+            }
+            $configured = LP_Missing_Deadline::get_action();
+            foreach ( array_keys( $order->get_items( 'line_item' ) ) as $item_id ) {
+                // Fresh copy per line: an earlier line may have changed totals, refunds or the status.
+                $order = wc_get_order( $order_id );
+                $item  = $order instanceof WC_Order ? $order->get_item( $item_id, false ) : null;
+                if ( ! $item instanceof WC_Order_Item_Product || LP_Missing_Lifecycle::order_is_closed( $order ) ) {
+                    continue;
+                }
+                $data = LP_Missing_Line::get_item_data( $item );
+                if ( ! self::is_deadline_due( $data, $now ) ) {
+                    continue;
+                }
+                // Nothing was paid on an unpaid order, so there is nothing to refund: remove the quantity instead.
+                $mode   = 'refund' === $configured && $order->is_paid() ? 'refund' : 'reduce';
+                $name   = $item->get_name();
+                $qty    = $data['qty_missing'];
+                $result = self::apply_delete_decision( $order, $item, $item_id, $data, $mode, 'automatic' );
+                $order  = wc_get_order( $order_id );
+
+                $results[ $item_id ] = array(
+                    'name'    => $name,
+                    'qty'     => isset( $result['qty'] ) ? $result['qty'] : $qty,
+                    'action'  => $mode,
+                    'status'  => $result['status'],
+                    'message' => $result['message'],
+                    'amount'  => isset( $result['amount'] ) ? $result['amount'] : 0,
+                );
+
+                if ( 'success' === $result['status'] ) {
+                    $order->add_order_note(
+                        sprintf(
+                            /* translators: 1: product name, 2: action */
+                            __( 'Decision deadline passed without an answer from the customer. Default action applied automatically to %1$s: %2$s.', 'lp-missing' ),
+                            $name,
+                            'refund' === $mode ? __( 'refund recorded (pay it back via the payment provider)', 'lp-missing' ) : __( 'missing quantity removed from the order', 'lp-missing' )
+                        )
+                    );
+                    LP_Missing_Logger::info(
+                        'Deadline passed: default action applied.',
+                        array(
+                            'order_id' => $order_id,
+                            'item_id'  => absint( $item_id ),
+                            'action'   => $mode,
+                            'amount'   => $results[ $item_id ]['amount'],
+                        )
+                    );
+                    /**
+                     * Fires after the decision deadline's default action was applied to a line.
+                     *
+                     * @param WC_Order $order   Order (reloaded).
+                     * @param int      $item_id Line item ID (the line may be gone after 'reduce').
+                     * @param string   $action  'refund' or 'reduce' (what was actually applied).
+                     */
+                    do_action( 'lp_missing_deadline_action', $order, $item_id, $mode );
+                    continue;
+                }
+
+                // Keep the line open for staff, and do not retry automatically until it starts waiting again.
+                $item = $order ? $order->get_item( $item_id, false ) : null;
+                if ( $item ) {
+                    $failed                          = LP_Missing_Line::get_item_data( $item );
+                    $failed['needs_attention']       = true;
+                    $failed['auto_action_failed_at'] = $now;
+                    $item->update_meta_data( LP_Missing_Plugin::META_KEY, $failed );
+                    $item->save();
+                    LP_Missing_Orders::refresh_order_flags( $order );
+                }
+                if ( $order ) {
+                    $order->add_order_note(
+                        sprintf(
+                            /* translators: 1: product name, 2: error */
+                            __( 'Decision deadline passed, but the automatic action for %1$s failed (%2$s). Handle it manually.', 'lp-missing' ),
+                            $name,
+                            $result['message']
+                        )
+                    );
+                }
+                LP_Missing_Logger::error(
+                    'Deadline passed: default action failed.',
+                    array(
+                        'order_id' => $order_id,
+                        'item_id'  => absint( $item_id ),
+                        'action'   => $mode,
+                        'reason'   => $result['message'],
+                    )
+                );
+            }
+        } finally {
+            $notes             = self::$note_buffer;
+            self::$note_buffer = null;
+            $order             = $notes ? wc_get_order( $order_id ) : null;
+            if ( $order instanceof WC_Order ) {
+                self::add_customer_note( $order, implode( ' ', $notes ), 'automatic' );
+            }
+            LP_Missing_Admin_Actions::release_apply_lock( $order_id );
+        }
+
+        return array( 'status' => $results ? 'done' : 'nothing', 'results' => $results );
     }
 }

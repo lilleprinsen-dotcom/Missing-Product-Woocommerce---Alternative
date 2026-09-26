@@ -16,12 +16,12 @@ global $wpdb;
 
 // Scheduled work (Action Scheduler when available, plus any WP-Cron leftovers).
 if ( function_exists( 'as_unschedule_all_actions' ) ) {
-    foreach ( array( 'lp_missing_send_reminder', 'lp_missing_send_order_reminder', 'lp_missing_cleanup_order', 'lp_missing_daily_cleanup', 'lp_missing_deadline' ) as $hook ) {
+    foreach ( array( 'lp_missing_send_reminder', 'lp_missing_order_reminder', 'lp_missing_order_deadline', 'lp_missing_cleanup_order', 'lp_missing_daily_cleanup' ) as $hook ) {
         as_unschedule_all_actions( $hook );
     }
     as_unschedule_all_actions( '', array(), 'lp-missing' );
 }
-foreach ( array( 'lp_missing_send_reminder', 'lp_missing_send_order_reminder', 'lp_missing_cleanup_order', 'lp_missing_daily_cleanup', 'lp_missing_deadline' ) as $hook ) {
+foreach ( array( 'lp_missing_send_reminder', 'lp_missing_order_reminder', 'lp_missing_order_deadline', 'lp_missing_cleanup_order', 'lp_missing_daily_cleanup' ) as $hook ) {
     wp_unschedule_hook( $hook );
 }
 

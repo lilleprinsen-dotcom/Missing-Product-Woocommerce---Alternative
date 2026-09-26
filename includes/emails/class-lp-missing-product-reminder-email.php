@@ -1,6 +1,12 @@
 <?php
 /**
- * Reminder email for lines still waiting for the customer.
+ * Customer reminder: one per order, listing every line still waiting for the customer's choice.
+ *
+ * Placeholders: {order_number}, {order_date}, {count} (number of lines waiting), {item_names} (also {item_name}),
+ * {deadline} (formatted, empty without a deadline), {customer_first_name}, {magic_link}, plus WooCommerce's
+ * {site_title}, {site_address}, {site_url}, {store_email}.
+ *
+ * Templates: emails/lp-missing-reminder.php and emails/plain/lp-missing-reminder.php.
  *
  * @package LP_Missing
  */
@@ -9,77 +15,50 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-class LP_Missing_Product_Reminder_Email extends WC_Email {
-
-    protected $item_name = '';
+class LP_Missing_Product_Reminder_Email extends LP_Missing_Email_Base {
 
     public function __construct() {
         $this->id             = 'lp_missing_customer_reminder';
         $this->customer_email = true;
-        $this->title          = __( 'Påminnelse – manglende varer', 'lp-missing' );
-        $this->description    = __( 'Påminnelse til kunden om å velge løsning for manglende varer.', 'lp-missing' );
-        $this->heading        = __( 'Liten påminnelse fra oss 💌', 'lp-missing' );
-        $this->subject        = __( 'Påminnelse: vi venter på valget ditt for ordre #{order_number}', 'lp-missing' );
-        $this->placeholders   = array(
-            '{order_number}' => '',
-            '{magic_link}'   => '',
-            '{item_name}'    => '',
-        );
+        $this->title          = __( 'Missing items – reminder', 'lp-missing' );
+        $this->description    = __( 'Reminder to the customer (one per order, inside the reminder window) listing the missing items still waiting for a choice.', 'lp-missing' );
+        $this->template_html  = 'emails/lp-missing-reminder.php';
+        $this->template_plain = 'emails/plain/lp-missing-reminder.php';
+        $this->placeholders   = array_merge( $this->get_customer_placeholders(), array( '{item_name}' => '' ) );
         parent::__construct();
     }
 
-    public function trigger( $order_id, $item_id = 0 ) {
-        $order = wc_get_order( $order_id );
-        if ( ! $order instanceof WC_Order || ! LP_Missing_Product_Handler::order_has_missing_items( $order ) ) {
-            return false;
-        }
-        $item = $order->get_item( $item_id, false );
-        if ( ! $item ) {
-            return false;
-        }
-        $this->object     = $order;
-        $this->recipient  = $order->get_billing_email();
-        // One reminder covers every line still waiting for the customer.
-        $names            = LP_Missing_Product_Handler::get_awaiting_item_names( $order );
-        $this->item_name  = $names ? implode( ', ', $names ) : $item->get_name();
-        $this->placeholders['{order_number}'] = $order->get_order_number();
-        $this->placeholders['{magic_link}']   = LP_Missing_Product_Handler::get_magic_link_for_order( $order );
-        $this->placeholders['{item_name}']    = $this->item_name;
-
-        if ( ! $this->is_enabled() || ! $this->get_recipient() ) {
-            return false;
-        }
-
-        return $this->send( $this->get_recipient(), $this->get_subject(), $this->get_content(), $this->get_headers(), $this->get_attachments() );
+    public function get_default_subject() {
+        return __( 'Påminnelse: velg erstatning for {count} vare(r) i ordre #{order_number}', 'lp-missing' );
     }
 
-    public function get_content_html() {
-        ob_start();
-        wc_get_template( 'emails/email-header.php', array( 'email_heading' => $this->get_heading(), 'email' => $this ) );
-        $name = LP_Missing_Product_Handler::get_customer_first_name( $this->object );
-        ?>
-        <p><?php printf( esc_html__( 'Hei %1$s 👋 Vi trenger fortsatt valget ditt for %2$s i ordre %3$s.', 'lp-missing' ), esc_html( $name ), esc_html( $this->placeholders['{item_name}'] ), esc_html( $this->object->get_order_number() ) ); ?></p>
-        <p><?php esc_html_e( 'Åpne lenken under for å fullføre valget ditt.', 'lp-missing' ); ?></p>
-        <p><?php esc_html_e( 'Du ser samtidig en enkel prisoversikt (mer, mindre eller samme pris).', 'lp-missing' ); ?></p>
-        <p>
-            <a class="button" href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php esc_html_e( 'Åpne valgside', 'lp-missing' ); ?></a>
-        </p>
-        <p><?php esc_html_e( 'Hvis knappen ikke virker, kopier denne lenken inn i nettleseren:', 'lp-missing' ); ?><br />
-            <a href="<?php echo esc_url( $this->placeholders['{magic_link}'] ); ?>"><?php echo esc_html( $this->placeholders['{magic_link}'] ); ?></a>
-        </p>
-        <?php
-        wc_get_template( 'emails/email-footer.php', array( 'email' => $this ) );
-        return ob_get_clean();
+    public function get_default_heading() {
+        return __( 'Vi venter fortsatt på valget ditt', 'lp-missing' );
     }
 
-    public function get_content_plain() {
-        $name = LP_Missing_Product_Handler::get_customer_first_name( $this->object );
-        $lines = array(
-            sprintf( __( 'Hei %1$s! Vi trenger fortsatt valget ditt for %2$s i ordre %3$s.', 'lp-missing' ), $name, $this->placeholders['{item_name}'], $this->object->get_order_number() ),
-            __( 'Bruk lenken under for å velge alternativ.', 'lp-missing' ),
-            __( 'Lenken viser tydelig om alternativet blir dyrere, billigere eller lik pris.', 'lp-missing' ),
-            $this->placeholders['{magic_link}'],
-        );
-        return implode( "\n\n", $lines );
+    public function get_default_additional_content() {
+        return __( 'Har du spørsmål? Svar gjerne på denne e-posten, så hjelper vi deg.', 'lp-missing' );
+    }
+
+    /**
+     * @param int           $order_id
+     * @param int           $item_id Unused (reminders are per order); kept for backwards compatibility.
+     * @param WC_Order|null $order   Optional order object (the caller's current copy).
+     * @return bool Whether the email was sent.
+     */
+    public function trigger( $order_id, $item_id = 0, $order = null ) {
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order_id );
+        if ( ! $order instanceof WC_Order || ! LP_Missing_Orders::order_has_missing_items( $order ) ) {
+            return false;
+        }
+        $this->setup_locale();
+        $this->prepare_customer_email( $order, true );
+        $sent = $this->lines ? $this->send_prepared() : false;
+        $this->restore_locale();
+        return $sent;
+    }
+
+    protected function get_template_args( $plain_text ) {
+        return $this->get_customer_template_args( $plain_text );
     }
 }
