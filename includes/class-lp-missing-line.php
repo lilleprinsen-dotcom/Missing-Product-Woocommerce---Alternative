@@ -32,6 +32,7 @@ class LP_Missing_Line {
             'decision_made_at'=> 0,
             'pricing_snapshot'=> array(),
             'deadline_at'     => 0,
+            'notified_at'     => 0,
         );
     }
 
@@ -59,6 +60,7 @@ class LP_Missing_Line {
         $data['decision_made_at'] = absint( isset( $data['decision_made_at'] ) ? $data['decision_made_at'] : 0 );
         $data['pricing_snapshot'] = is_array( $data['pricing_snapshot'] ) ? $data['pricing_snapshot'] : array();
         $data['deadline_at'] = absint( $data['deadline_at'] );
+        $data['notified_at'] = absint( $data['notified_at'] );
 
         if ( 'alt_accepted' === $data['status'] ) {
             $data['status'] = 'alt_pending';

@@ -375,4 +375,23 @@ class LP_Missing_Lifecycle {
 
         self::schedule_cleanup_for_order( $order );
     }
+
+    /**
+     * When the next reminder for this order goes out (0 when none is scheduled).
+     * Contract used by the admin screen; the scheduler decides how reminders are stored.
+     */
+    public static function get_next_reminder_timestamp( $order ) {
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order );
+        if ( ! $order instanceof WC_Order ) {
+            return 0;
+        }
+        $next = 0;
+        foreach ( $order->get_items( 'line_item' ) as $item_id => $item ) {
+            $ts = wp_next_scheduled( 'lp_missing_send_reminder', array( $order->get_id(), $item_id ) );
+            if ( $ts && ( ! $next || $ts < $next ) ) {
+                $next = $ts;
+            }
+        }
+        return (int) $next;
+    }
 }

@@ -81,4 +81,36 @@ class LP_Missing_Magic_Link {
         );
         return add_query_arg( $args, self::get_portal_base_url() );
     }
+
+    const LINK_GENERATION_META = '_lp_missing_link_gen';
+
+    /**
+     * Invalidate every customer link issued for this order so far (new emails carry new links).
+     * Contract used by the admin screen; the link format decides how the generation is checked.
+     */
+    public static function revoke_links( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        $order->update_meta_data( self::LINK_GENERATION_META, absint( $order->get_meta( self::LINK_GENERATION_META, true ) ) + 1 );
+        $order->save();
+        LP_Missing_Logger::info( 'Customer links revoked.', array( 'order_id' => $order->get_id() ) );
+    }
+
+    /**
+     * URL for staff to open the portal of an order as the customer sees it (read-only preview).
+     * Contract used by the admin screen; the portal validates the nonce and the capability.
+     */
+    public static function get_staff_preview_url( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+        return add_query_arg(
+            array(
+                'oid'        => $order->get_id(),
+                'lp_preview' => wp_create_nonce( 'lp_missing_preview_' . $order->get_id() ),
+            ),
+            self::get_portal_base_url()
+        );
+    }
 }
