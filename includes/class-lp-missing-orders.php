@@ -14,7 +14,8 @@ class LP_Missing_Orders {
      * Order flag: at least one line has a customer answer that staff must act on (apply the alternative or the
      * removal, or handle a declined line). Maintained by refresh_order_flags() like the other flags.
      */
-    const READY_FLAG = '_lp_missing_ready';
+    /** @deprecated 1.3.0 Use LP_Missing_Plugin::ORDER_META_READY. */
+    const READY_FLAG = LP_Missing_Plugin::ORDER_META_READY;
 
     /**
      * Line statuses where the customer has answered and the next step is the store's.
@@ -43,19 +44,6 @@ class LP_Missing_Orders {
     }
 
     public static function order_has_missing_items( $order ) {
-        if ( ! $order instanceof WC_Order ) {
-            return false;
-        }
-        foreach ( $order->get_items( 'line_item' ) as $item ) {
-            $data = LP_Missing_Line::get_item_data( $item );
-            if ( ! empty( $data['missing'] ) && ! LP_Missing_Line::is_line_resolved( $data ) ) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    public static function order_has_open_missing_items( $order ) {
         if ( ! $order instanceof WC_Order ) {
             return false;
         }
@@ -100,10 +88,10 @@ class LP_Missing_Orders {
         }
 
         $flags = array(
-            LP_Missing_Plugin::OPTION_ATTENTION_FLAG    => $needs_attention,
-            LP_Missing_Plugin::OPTION_HAS_MISSING_DATA  => $has_data,
-            LP_Missing_Plugin::OPTION_HAS_OPEN_MISSING  => $has_open,
-            self::READY_FLAG                            => $ready,
+            LP_Missing_Plugin::ORDER_META_NEEDS_ATTENTION    => $needs_attention,
+            LP_Missing_Plugin::ORDER_META_HAS_DATA  => $has_data,
+            LP_Missing_Plugin::ORDER_META_HAS_OPEN  => $has_open,
+            LP_Missing_Plugin::ORDER_META_READY                            => $ready,
         );
 
         $changed = false;
@@ -149,22 +137,18 @@ class LP_Missing_Orders {
         return max( $modified_ts, $created_ts );
     }
 
-    public static function refresh_order_attention_flag( $order ) {
-        self::refresh_order_flags( $order );
-    }
-
     /**
      * Count orders with an open missing-item case. An escalated line is always an open line.
      */
     public static function count_orders_with_open_missing() {
-        return self::count_orders_with_flag( LP_Missing_Plugin::OPTION_HAS_OPEN_MISSING );
+        return self::count_orders_with_flag( LP_Missing_Plugin::ORDER_META_HAS_OPEN );
     }
 
     /**
      * Count orders where a customer has answered and staff must act (the "Customer answered" view).
      */
     public static function count_orders_ready_for_staff() {
-        return self::count_orders_with_flag( self::READY_FLAG );
+        return self::count_orders_with_flag( LP_Missing_Plugin::ORDER_META_READY );
     }
 
     /**
@@ -202,7 +186,7 @@ class LP_Missing_Orders {
             'type'       => 'shop_order',
             'limit'      => -1,
             'return'     => 'ids',
-            'meta_key'   => LP_Missing_Plugin::OPTION_HAS_MISSING_DATA,
+            'meta_key'   => LP_Missing_Plugin::ORDER_META_HAS_DATA,
             'meta_value' => 'yes',
         ) );
         foreach ( $order_ids as $order_id ) {

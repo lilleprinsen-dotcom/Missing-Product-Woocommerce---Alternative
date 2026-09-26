@@ -38,27 +38,21 @@ class LP_Missing_Deadline {
     }
 
     /**
-     * Deadline stored on a line (set when the case starts waiting), or 0 when there is none.
+     * Deadline stored on a line when it started waiting for the customer, or 0. Lines that were already waiting when
+     * the deadline was switched on have none: their customers were never told about one, so none is enforced or shown.
      */
     public static function get_for_line( $data ) {
         if ( ! self::enabled() || ! LP_Missing_Line::is_awaiting_customer( $data ) ) {
             return 0;
         }
-        return ! empty( $data['deadline_at'] ) ? absint( $data['deadline_at'] ) : self::calculate( $data['first_missing_at'] );
+        return absint( $data['deadline_at'] );
     }
 
     /**
-     * Earliest deadline among the order's lines waiting for the customer, or 0.
+     * Earliest enforced deadline among the order's lines waiting for the customer, or 0 (none for closed orders).
      */
     public static function get_for_order( $order ) {
-        $earliest = 0;
-        foreach ( $order->get_items( 'line_item' ) as $item ) {
-            $deadline = self::get_for_line( LP_Missing_Line::get_item_data( $item ) );
-            if ( $deadline && ( ! $earliest || $deadline < $earliest ) ) {
-                $earliest = $deadline;
-            }
-        }
-        return $earliest;
+        return $order instanceof WC_Order ? LP_Missing_Lifecycle::get_order_deadline( $order ) : 0;
     }
 
     /**
@@ -71,12 +65,14 @@ class LP_Missing_Deadline {
     /**
      * Customer-facing sentence describing what happens at the deadline, or '' without a deadline.
      */
-    public static function describe( $timestamp ) {
+    public static function describe( $timestamp, $order = null ) {
         if ( ! $timestamp ) {
             return '';
         }
         $when = self::format( $timestamp );
-        if ( 'reduce' === self::get_action() ) {
+        // Nothing was paid on an unpaid order, so the automatic action removes the item instead of refunding it.
+        $unpaid = $order instanceof WC_Order && ! $order->is_paid();
+        if ( 'reduce' === self::get_action() || $unpaid ) {
             return sprintf( __( 'Hvis vi ikke hører fra deg innen %s, fjerner vi varen fra ordren.', 'lp-missing' ), $when );
         }
         return sprintf( __( 'Hvis vi ikke hører fra deg innen %s, refunderer vi varen.', 'lp-missing' ), $when );

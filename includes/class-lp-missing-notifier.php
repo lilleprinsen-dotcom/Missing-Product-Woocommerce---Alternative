@@ -42,14 +42,7 @@ class LP_Missing_Notifier {
      * so the missing quantity is removed instead.
      */
     public static function get_deadline_text( $order, $deadline ) {
-        if ( ! $deadline ) {
-            return '';
-        }
-        if ( 'refund' === LP_Missing_Deadline::get_action() && $order instanceof WC_Order && ! $order->is_paid() ) {
-            /* translators: %s: deadline, e.g. "fredag 3. oktober kl. 12:00" */
-            return sprintf( __( 'Hvis vi ikke hører fra deg innen %s, fjerner vi varen fra ordren.', 'lp-missing' ), LP_Missing_Deadline::format( $deadline ) );
-        }
-        return LP_Missing_Deadline::describe( $deadline );
+        return LP_Missing_Deadline::describe( $deadline, $order );
     }
 
     public static function register_email_class( $emails ) {

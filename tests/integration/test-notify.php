@@ -1,6 +1,7 @@
 <?php
 // Notifications, scheduling and automatic actions. Run with: wp eval-file tests/integration/test-notify.php
 require __DIR__ . '/bootstrap.php';
+require __DIR__ . '/portal-helpers.php';
 
 echo "HPOS: " . ( \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled() ? 'on' : 'off' ) . "\n";
 
@@ -189,7 +190,7 @@ t_eq( $t1, call( 'get_next_reminder_timestamp', $o ), 'get_next_reminder_timesta
 update_option( 'lp_missing_db_version', '1.1.0' );
 delete_transient( 'lp_missing_upgrading' );
 LP_Missing_Plugin::maybe_upgrade();
-t_eq( '1.2.0', get_option( 'lp_missing_db_version' ), 'upgrade ran to 1.2.0' );
+t_eq( LP_Missing_Plugin::VERSION, get_option( 'lp_missing_db_version' ), 'upgrade ran to the current version' );
 t_ok( ! wp_next_scheduled( 'lp_missing_send_reminder', array( $o->get_id(), $ids[0] ) ) && ! wp_next_scheduled( 'lp_missing_send_reminder', array( $o->get_id(), $ids[1] ) ), 'legacy reminders cleared from WP-Cron' );
 t_ok( ! wp_next_scheduled( 'lp_missing_cleanup_order', array( 999999 ) ) && ! wp_next_scheduled( 'lp_missing_daily_cleanup' ), 'cleanup events cleared from WP-Cron' );
 t_eq( 1, count( pending_ids( 'lp_missing_order_reminder', array( $o->get_id() ) ) ), 'two per-line reminders became one order reminder' );
@@ -295,7 +296,7 @@ t_ok( false !== strpos( $m['message'], '2 av 5 stk' ) && false !== strpos( $m['m
 t_ok( false !== strpos( $m['message'], 'Kommer igjen om to uker' ), 'staff note visible to the customer is shown' );
 t_ok( false !== strpos( $m['message'], 'Forslag til erstatning: Bleier str 5' ), 'suggested alternatives named' );
 t_ok( false !== strpos( $m['message'], 'fjerne varen fra ordren' ), 'removal offer mentioned' );
-t_ok( false !== strpos( $m['message'], 'oid=' . $o->get_id() ) && false !== strpos( $m['message'], 'key=' ), 'magic link included' );
+t_ok( false !== strpos( $m['message'], 'oid=' . $o->get_id() ) && false !== strpos( $m['message'], 'lpk=' ), 'magic link included' );
 t_ok( false !== strpos( $m['message'], 'Har du spørsmål' ), 'default additional content shown' );
 t_ok( false === strpos( $m['message'], 'Hvis vi ikke hører fra deg' ), 'no deadline sentence without a deadline' );
 t_eq( 'kunde@example.com', $m['to'], 'sent to the billing email' );
@@ -367,10 +368,9 @@ $o   = make_order( $A, 5 );
 $iid = first_item_id( $o );
 admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '2', 'alternatives' => array( $B->get_id(), $C->get_id() ) ) ) );
 $GLOBALS['lp_mails'] = array();
-$html  = portal_request( $o );
-$html  = portal_request( $o, array( 'lp_missing_verify_email' => 'kunde@example.com', 'lp_missing_verify_nonce' => extract_field( $html, 'lp_missing_verify_nonce' ) ) );
-$token = extract_field( $html, 'lp_missing_verified' );
-portal_request( $o, array( 'lp_missing_nonce' => extract_field( $html, 'lp_missing_nonce' ), 'lp_missing_verified' => $token, 'lp_missing_item_id' => $iid, 'lp_missing_alt_id' => $B->get_id(), 'lp_missing_alt_qty' => 2, 'lp_missing_action' => 'accept_alt' ) );
+portal_jar_reset();
+portal_login( $o );
+portal_save( $o, array( $iid => 'alt:' . $B->get_id() ), array( $iid => 2 ) );
 t_eq( 'alt_pending', item_data( $o->get_id(), $iid )['status'], 'customer chose in the portal' );
 $sm = mails_to( $staff );
 t_eq( 1, count( $sm ), 'staff email sent to the staff address' );
@@ -683,7 +683,7 @@ call( 'send_customer_email', wc_get_order( $o->get_id() ) );
 $m = mails_with_subject( 'Velg erstatning' );
 $plain = $m ? $m[0]['message'] : '';
 t_ok( false !== strpos( $plain, '- Bleier str 4: mangler 1 av 3 stk' ) && false !== strpos( $plain, 'Utsolgt hos leverandør' ), 'plain text template lists the items' );
-t_ok( false === strpos( $plain, '<' ) && false !== strpos( $plain, 'oid=' . $o->get_id() . '&key=' ), 'plain text has no markup and a raw link' );
+t_ok( false === strpos( $plain, '<' ) && false !== strpos( $plain, 'oid=' . $o->get_id() . '&lpk=' ), 'plain text has no markup and a raw link' );
 $email->settings['email_type'] = 'html';
 $email->email_type             = 'html';
 t_eq( 'lp-missing', LP_Missing_Notifier::template_directory( 'woocommerce', 'emails/lp-missing-customer.php' ), 'theme override directory is lp-missing/' );

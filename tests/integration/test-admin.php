@@ -126,7 +126,7 @@ $iid = first_item_id( $o );
 admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '2', 'alternatives' => array( $B->get_id(), $C->get_id() ) ) ) );
 t_eq( '', flag( $o, '_lp_missing_ready' ), 'line waiting for the customer: no ready flag' );
 t_eq( 'yes', flag( $o, '_lp_missing_has_open' ), 'order is open' );
-t_eq( '_lp_missing_ready', LP_Missing_Orders::READY_FLAG, 'flag key' );
+t_eq( '_lp_missing_ready', LP_Missing_Plugin::ORDER_META_READY, 'flag key' );
 
 set_line_status( $o, $iid, array( 'status' => 'alt_pending', 'selected_alt_id' => $B->get_id(), 'qty_alt' => 2, 'decision_made_at' => time() ) );
 t_eq( 'yes', flag( $o, '_lp_missing_ready' ), 'customer chose an alternative: ready flag set' );

@@ -769,9 +769,10 @@ class LP_Missing_Lifecycle {
 
         LP_Missing_Scheduler::unschedule( LP_Missing_Plugin::CLEANUP_HOOK, array( $order->get_id() ) );
         // Always drop the order-level flags, also when no line data was left, so the order leaves the cleanup queue.
-        $order->delete_meta_data( LP_Missing_Plugin::OPTION_ATTENTION_FLAG );
-        $order->delete_meta_data( LP_Missing_Plugin::OPTION_HAS_OPEN_MISSING );
-        $order->delete_meta_data( LP_Missing_Plugin::OPTION_HAS_MISSING_DATA );
+        $order->delete_meta_data( LP_Missing_Plugin::ORDER_META_NEEDS_ATTENTION );
+        $order->delete_meta_data( LP_Missing_Plugin::ORDER_META_HAS_OPEN );
+        $order->delete_meta_data( LP_Missing_Plugin::ORDER_META_HAS_DATA );
+        $order->delete_meta_data( LP_Missing_Plugin::ORDER_META_READY );
         $order->save();
 
         return $changed;
@@ -795,7 +796,7 @@ class LP_Missing_Lifecycle {
                     'return'        => 'objects',
                     'orderby'       => 'modified',
                     'order'         => 'ASC',
-                    'meta_key'      => LP_Missing_Plugin::OPTION_HAS_MISSING_DATA, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_query_meta_key
+                    'meta_key'      => LP_Missing_Plugin::ORDER_META_HAS_DATA, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_query_meta_key
                     'meta_value'    => 'yes', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_query_meta_value
                     'date_modified' => '<' . $cutoff,
                 )
@@ -806,7 +807,7 @@ class LP_Missing_Lifecycle {
             }
 
             foreach ( $orders as $order ) {
-                if ( LP_Missing_Orders::order_has_open_missing_items( $order ) ) {
+                if ( LP_Missing_Orders::order_has_missing_items( $order ) ) {
                     $skipped++;
                     continue;
                 }
@@ -847,7 +848,7 @@ class LP_Missing_Lifecycle {
                 'return'     => 'ids',
                 'orderby'    => 'date',
                 'order'      => 'DESC',
-                'meta_key'   => LP_Missing_Plugin::OPTION_HAS_OPEN_MISSING, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_query_meta_key
+                'meta_key'   => LP_Missing_Plugin::ORDER_META_HAS_OPEN, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_query_meta_key
                 'meta_value' => 'yes', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_query_meta_value
             )
         );
@@ -879,7 +880,7 @@ class LP_Missing_Lifecycle {
         }
 
         if ( $changed ) {
-            LP_Missing_Orders::refresh_order_attention_flag( $order );
+            LP_Missing_Orders::refresh_order_flags( $order );
         }
         // Lines resolved later get their own (later) cleanup.
         self::schedule_cleanup_for_order( $order );

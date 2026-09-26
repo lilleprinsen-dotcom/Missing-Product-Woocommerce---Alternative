@@ -16,16 +16,23 @@ class LP_Missing_Plugin {
     const OPTION_SECRET = 'lp_missing_secret';
     const OPTION_PORTAL_URL = 'lp_missing_portal_url';
     const OPTION_SETTINGS = 'lp_missing_settings';
-    const OPTION_ATTENTION_FLAG = '_lp_missing_needs_attention';
-    const OPTION_HAS_MISSING_DATA = '_lp_missing_has_data';
-    const OPTION_HAS_OPEN_MISSING = '_lp_missing_has_open';
+    // Order meta flags used by the order list, cleanup and queries.
+    const ORDER_META_NEEDS_ATTENTION = '_lp_missing_needs_attention';
+    const ORDER_META_HAS_DATA = '_lp_missing_has_data';
+    const ORDER_META_HAS_OPEN = '_lp_missing_has_open';
+    const ORDER_META_READY = '_lp_missing_ready';
+    /** @deprecated 1.3.0 Use ORDER_META_NEEDS_ATTENTION. */
+    const OPTION_ATTENTION_FLAG = self::ORDER_META_NEEDS_ATTENTION;
+    /** @deprecated 1.3.0 Use ORDER_META_HAS_DATA. */
+    const OPTION_HAS_MISSING_DATA = self::ORDER_META_HAS_DATA;
+    /** @deprecated 1.3.0 Use ORDER_META_HAS_OPEN. */
+    const OPTION_HAS_OPEN_MISSING = self::ORDER_META_HAS_OPEN;
     const CLEANUP_HOOK = 'lp_missing_cleanup_order';
     const DAILY_CLEANUP_HOOK = 'lp_missing_daily_cleanup';
     const DAILY_CLEANUP_LIMIT = 25;
     const CLEANUP_MIN_DAYS = 7;
     const SHORTCODE = 'lp_missing_items';
     const MOVED_QTY_META = '_lp_missing_moved_qty';
-    const VERIFY_TOKEN_TTL = 7200;
     const MAX_ALTERNATIVES = 3;
 
     const DB_VERSION_OPTION = 'lp_missing_db_version';

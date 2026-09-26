@@ -69,16 +69,19 @@ const until = (page, fn, arg) => page.waitForFunction(fn, arg, { timeout: 15000 
 
   // S5 customer link tools.
   const copy = box.locator('button.lp-missing-copy-link');
-  ok(await copy.count() === 1 && await copy.getAttribute('data-link') === fx.openLink, 'copy button carries the customer link');
+  // v2 links carry their own expiry, so compare the order and link format rather than the exact string.
+  const linkOk = (l) => typeof l === 'string' && l.includes(`oid=${fx.open}`) && /[?&]lpk=[^&]+/.test(l) && l.split('?')[0] === fx.openLink.split('?')[0];
+  const shownLink = await copy.getAttribute('data-link');
+  ok(await copy.count() === 1 && linkOk(shownLink), 'copy button carries the customer link');
   await copy.click();
   await until(page, () => document.querySelector('.lp-missing-copy-status').textContent !== '');
   ok((await box.locator('.lp-missing-copy-status').innerText()).includes('copied'), 'copy reports success');
-  ok(await page.evaluate(() => navigator.clipboard.readText()) === fx.openLink, 'customer link is on the clipboard');
+  ok(await page.evaluate(() => navigator.clipboard.readText()) === shownLink, 'customer link is on the clipboard');
   await page.evaluate(() => { navigator.clipboard.writeText = () => Promise.reject(new Error('denied')); });
   await copy.click();
   await until(page, () => !document.querySelector('.lp-missing-link-field').hidden);
   const field = box.locator('.lp-missing-link-field');
-  ok(await field.isVisible() && await field.inputValue() === fx.openLink, 'clipboard refused: the link is shown in a text field');
+  ok(await field.isVisible() && await field.inputValue() === shownLink, 'clipboard refused: the link is shown in a text field');
 
   const preview = box.locator('a.lp-missing-preview');
   const href = await preview.getAttribute('href');
@@ -147,8 +150,9 @@ const until = (page, fn, arg) => page.waitForFunction(fn, arg, { timeout: 15000 
   const state = readyRow.locator('.lp-missing-state');
   ok((await state.innerText()).includes('Customer answered – ready to apply'), 'column shows the ready state');
   ok(await state.evaluate((el) => el.classList.contains('lp-missing-state--ready') && getComputedStyle(el).color === 'rgb(0, 112, 23)'), 'ready state is green (admin.css on the list)');
-  await page.goto(fx.listOpen);
-  ok((await row(page, fx.vorder).locator('.lp-missing-state').innerText()).includes('Awaiting resolution'), 'open view lists waiting orders as "Awaiting resolution"');
+  // Search for the order so the check does not depend on list paging on busy test sites.
+  await page.goto(fx.listOpen + (fx.listOpen.includes('?') ? '&' : '?') + 's=' + fx.vorder);
+  ok((await row(page, fx.vorder).locator('.lp-missing-state').innerText({ timeout: 10000 })).includes('Awaiting resolution'), 'open view lists waiting orders as "Awaiting resolution"');
 
   ok(scriptErrors.length === 0, 'no script errors from admin.js ' + scriptErrors.join(' | '));
   await browser.close();

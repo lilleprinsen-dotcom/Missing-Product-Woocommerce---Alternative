@@ -43,7 +43,7 @@ class LP_Missing_Portal_View {
                     'customer_id' => get_current_user_id(),
                     'limit'       => 10,
                     'return'      => 'objects',
-                    'meta_key'    => LP_Missing_Plugin::OPTION_HAS_OPEN_MISSING, // phpcs:ignore WordPress.DB.SlowDBQuery
+                    'meta_key'    => LP_Missing_Plugin::ORDER_META_HAS_OPEN, // phpcs:ignore WordPress.DB.SlowDBQuery
                     'meta_value'  => 'yes', // phpcs:ignore WordPress.DB.SlowDBQuery
                 )
             );
@@ -150,7 +150,7 @@ class LP_Missing_Portal_View {
             'order_label'   => sprintf( __( 'Ordre %s', 'lp-missing' ), $order->get_order_number() ),
             'intro'         => __( 'Noen varer i bestillingen din mangler dessverre. Velg hva du vil at vi skal gjøre med hver av dem, og trykk «Lagre valgene». Prisen låses når du lagrer.', 'lp-missing' ),
             'change_hint'   => __( 'Du kan endre valget ditt helt til vi har oppdatert ordren.', 'lp-missing' ),
-            'deadline'      => $deadline ? LP_Missing_Deadline::describe( $deadline ) : '',
+            'deadline'      => $deadline ? LP_Missing_Deadline::describe( $deadline, $order ) : '',
             'notice'        => self::get_notice( $ctx, $awaiting ),
             'lines'         => $lines,
             'summary'       => $summary,

@@ -241,7 +241,7 @@ admin_save( $o6, array(
 	$l3 => array( 'missing' => '1', 'qty_missing' => '1', 'alternatives' => array( $B->get_id(), $E->get_id() ) ),
 ) );
 $o6 = wc_get_order( $o6->get_id() );
-t_ok( (bool) wp_next_scheduled( 'lp_missing_send_reminder', array( $o6->get_id(), $l1 ) ), 'reminder scheduled while waiting' );
+t_ok( call( 'get_next_reminder_timestamp', $o6 ) > 0, 'reminder scheduled while waiting' );
 portal_jar_reset();
 $page = portal_login( $o6 );
 $html = $page['html'];

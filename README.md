@@ -30,22 +30,46 @@ Settings: **WooCommerce → Missing Items Settings**. Email texts: **WooCommerce
 
 ## Extending
 
-Templates can be overridden in `yourtheme/lp-missing/` (see `templates/`). See [Hooks](#hooks) for actions and filters.
+Templates can be overridden in `yourtheme/lp-missing/` (see `templates/`). See [Hooks](#hooks) for actions and filters. Customer links expire (setting), can be revoked per order from the order screen, and are exchanged for a short-lived session cookie on first use.
 
 ## Hooks
 
-See the list below; every hook is prefixed `lp_missing_`.
+Actions:
 
-| Hook | Type | Arguments | When |
-|---|---|---|---|
-| `lp_missing_item_updated` | action | `$order, $item_id, $new_data, $old_data` | A line's missing-item data changed (used internally for notifications and reminders). |
-| `lp_missing_settings_fields` | filter | `$fields` | Settings schema (add or change settings). |
-| `lp_missing_settings_saved` | action | `$settings` | After the settings page was saved. |
-| `lp_missing_upgrade_steps` | filter | `$steps` | Versioned one-time upgrade steps. |
-| `lp_missing_store_covers_difference` | filter | `$covers, $gross_delta` | Whether the store absorbs a price difference. |
-| `lp_missing_portal_base_url` | filter | `$url` | Base URL of customer links. |
-| `lp_missing_enable_stock_log` | filter | `$enabled` | Whether stock locks are used. |
-| `lp_missing_daily_cleanup_limit` | filter | `$limit` | Orders cleaned per daily run. |
+| Action | Arguments | When |
+|---|---|---|
+| `lp_missing_item_updated` | `$order, $item_id, $new_data, $old_data` | A line's missing-item data changed (drives notifications, reminders and deadlines). |
+| `lp_missing_customer_decision` | `$order, $item_id, $new_data, $old_data` | The customer saved or changed a decision in the portal. |
+| `lp_missing_customer_notified` | `$order, $type` | The portal email (`initial`) or a reminder (`reminder`) was sent. |
+| `lp_missing_before_apply_decision` | `$order, $item_id, $type, $mode, null, $context` | Before a decision is applied (`$context`: `manual` or `automatic`). |
+| `lp_missing_after_apply_decision` | `$order, $item_id, $type, $mode, $result, $context` | After a decision was applied. |
+| `lp_missing_surcharge_order_created` | `$surcharge_order, $order, $snapshot` | A surcharge order for a more expensive alternative was created. |
+| `lp_missing_deadline_action` | `$order, $item_id, $mode` | The automatic deadline action ran for a line. |
+| `lp_missing_settings_saved` | `$settings` | After the settings page was saved. |
+| `lp_missing_portal_private_headers` | `$headers` | The portal sent its no-cache / no-referrer / noindex headers. |
+| `lp_missing_portal_set_cookie` | `$name, $value, $expires, $params` | The portal set its session cookie. |
+
+Filters:
+
+| Filter | Arguments | Purpose |
+|---|---|---|
+| `lp_missing_settings_fields` | `$fields` | Settings schema (add or change settings). |
+| `lp_missing_upgrade_steps` | `$steps` | Versioned one-time upgrade steps. |
+| `lp_missing_store_covers_difference` | `$covers, $gross_delta` | Whether the store absorbs a price difference. |
+| `lp_missing_price_delta` | `$delta, $order, $item, $alt_product, $qty, $snapshot` | Price difference (incl. VAT) used for the surcharge. |
+| `lp_missing_customer_note` | `$text, $order, $context` | Customer-visible order note written after an apply. |
+| `lp_missing_email_lines` | `$lines, $order, $awaiting_only` | Lines listed in customer emails. |
+| `lp_missing_next_reminder_time` | `$time, $from` | When the next reminder goes out (default: pushed into the reminder hours). |
+| `lp_missing_variant_suggestions` | `$products, $item, $order, $qty` | "Same product, other variant" suggestions. |
+| `lp_missing_portal_base_url` | `$url` | Base URL of customer links. |
+| `lp_missing_portal_rate_limit` | `array( 'max', 'window' )` | Portal save rate limit. |
+| `lp_missing_portal_session_ttl` | `$seconds` | Lifetime of the portal session cookie. |
+| `lp_missing_portal_page_has_shortcode` | `$has, $page_id` | Whether the portal page is considered set up. |
+| `lp_missing_portal_notice_screens` | `$screen_ids` | Screens that show the portal-page notice. |
+| `lp_missing_enable_stock_log` | `$enabled` | Whether stock locks are used. |
+| `lp_missing_use_action_scheduler` | `$use` | Use Action Scheduler (default) or WP-Cron. |
+| `lp_missing_daily_cleanup_limit` | `$limit` | Orders cleaned per daily run. |
+| `lp_missing_resync_limit` | `$limit` | Orders re-scheduled per run after a reactivation. |
 
 ## Uninstall
 

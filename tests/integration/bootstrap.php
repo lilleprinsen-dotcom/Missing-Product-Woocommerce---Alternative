@@ -65,7 +65,7 @@ function make_product( $name, $price, $stock = 50 ) {
 	$p = new WC_Product_Simple();
 	$p->set_name( $name );
 	$p->set_regular_price( $price );
-	$p->set_sku( sanitize_title( $name ) . '-' . wp_rand( 1000, 9999 ) );
+	$p->set_sku( sanitize_title( $name ) . '-' . uniqid() );
 	$p->set_manage_stock( true );
 	$p->set_stock_quantity( $stock );
 	$p->save();

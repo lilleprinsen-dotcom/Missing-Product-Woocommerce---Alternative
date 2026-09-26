@@ -28,8 +28,8 @@ class LP_Missing_Admin_Orders_List {
      */
     public static function get_view_flags() {
         return array(
-            'open'  => LP_Missing_Plugin::OPTION_HAS_OPEN_MISSING,
-            'ready' => LP_Missing_Orders::READY_FLAG,
+            'open'  => LP_Missing_Plugin::ORDER_META_HAS_OPEN,
+            'ready' => LP_Missing_Plugin::ORDER_META_READY,
         );
     }
 
@@ -126,10 +126,10 @@ class LP_Missing_Admin_Orders_List {
      */
     public static function get_column_state( $order ) {
         $states = array(
-            array( LP_Missing_Orders::READY_FLAG, 'ready', __( 'Customer answered – ready to apply', 'lp-missing' ), 'yes-alt' ),
-            array( LP_Missing_Plugin::OPTION_ATTENTION_FLAG, 'attention', __( 'Needs follow-up', 'lp-missing' ), 'flag' ),
-            array( LP_Missing_Plugin::OPTION_HAS_OPEN_MISSING, 'open', __( 'Awaiting resolution', 'lp-missing' ), 'warning' ),
-            array( LP_Missing_Plugin::OPTION_HAS_MISSING_DATA, 'resolved', __( 'Resolved (cleanup pending)', 'lp-missing' ), 'saved' ),
+            array( LP_Missing_Plugin::ORDER_META_READY, 'ready', __( 'Customer answered – ready to apply', 'lp-missing' ), 'yes-alt' ),
+            array( LP_Missing_Plugin::ORDER_META_NEEDS_ATTENTION, 'attention', __( 'Needs follow-up', 'lp-missing' ), 'flag' ),
+            array( LP_Missing_Plugin::ORDER_META_HAS_OPEN, 'open', __( 'Awaiting resolution', 'lp-missing' ), 'warning' ),
+            array( LP_Missing_Plugin::ORDER_META_HAS_DATA, 'resolved', __( 'Resolved (cleanup pending)', 'lp-missing' ), 'saved' ),
         );
         foreach ( $states as $state ) {
             if ( 'yes' === $order->get_meta( $state[0] ) ) {
