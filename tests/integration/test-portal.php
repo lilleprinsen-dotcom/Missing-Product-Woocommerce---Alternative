@@ -480,6 +480,11 @@ $page = portal_http( portal_clean_url( $o10 ), array(), $other );
 t_ok( false !== strpos( $page['html'], 'Åpne lenken i e-posten' ), 'another logged-in customer has no access' );
 $page = portal_http( get_permalink( wc_get_page_id( 'myaccount' ) ), array(), $uid, array( 'order_id' => $o10->get_id(), 'email' => 'kunde@example.com' ) );
 t_ok( false !== strpos( $page['html'], '<form' ) && false !== strpos( $page['html'], 'name="lp_oid"' ), 'owner gets the interactive portal through shortcode attributes' );
+// Owner with a portal session (opened the email link earlier) answering on a page with shortcode attributes.
+portal_follow( portal_http( call( 'get_magic_link_for_order', $o10 ), array(), $uid ), $uid );
+$page = portal_http( get_permalink( wc_get_page_id( 'myaccount' ) ), array(), $uid, array( 'order_id' => $o10->get_id(), 'email' => 'kunde@example.com' ) );
+$res  = portal_http( get_permalink( wc_get_page_id( 'myaccount' ) ), array( 'lp_oid' => $o10->get_id(), 'lp_missing_portal_action' => 'save', 'lp_missing_token' => extract_field( $page['html'], 'lp_missing_token' ), 'lp_choice' => array( $m1 => 'alt:' . $C->get_id() ) ), $uid );
+t_ok( false !== strpos( $res['redirect'], 'lp_msg=saved' ) && 'alt_pending' === item_data( $o10->get_id(), $m1 )['status'], 'owner with a session can save from a shortcode-attributes page' );
 $page = portal_http( get_permalink( wc_get_page_id( 'myaccount' ) ), array(), 1, array( 'order_id' => $o10->get_id(), 'email' => 'kunde@example.com' ) );
 t_ok( false !== strpos( $page['html'], 'Staff preview' ) && false === strpos( $page['html'], '<form' ), 'staff get a read-only preview through shortcode attributes' );
 

@@ -357,6 +357,8 @@ class LP_Missing_Portal {
         if ( LP_Missing_Portal_Access::is_order_owner( $order ) ) {
             $ctx['mode']   = 'customer';
             $ctx['source'] = 'attributes';
+            // The form posts back through handle_request(), which prefers this browser's session: bind the token alike.
+            $ctx['session'] = LP_Missing_Portal_Access::read_session( $order );
         } else {
             $ctx['mode']   = 'preview';
             $ctx['source'] = 'preview';
