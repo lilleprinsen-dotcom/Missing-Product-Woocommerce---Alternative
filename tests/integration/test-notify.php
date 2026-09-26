@@ -435,7 +435,7 @@ apply_via_handler( $o->get_id(), $iid, 'alternative', 'replace' );
 $notes = customer_notes( $o->get_id() );
 t_ok( notes_contain( $notes, 'Vi har byttet Bleier str 4 med Bleier str 5 (2 stk).' ), 'customer note describes the swap' );
 t_ok( notes_contain( $notes, 'Mellomlegg på' ) && notes_contain( $notes, 'faktureres i en egen ordre' ), 'customer note mentions the surcharge order' );
-t_ok( notes_contain( internal_notes( $o->get_id() ), 'Applied customer-selected alternative' ), 'internal note kept' );
+t_ok( notes_contain( internal_notes( $o->get_id() ), 'Replacement applied' ), 'internal note kept' );
 t_eq( 1, count( array_filter( mails_to( 'kunde@example.com' ), function ( $m ) { return false !== strpos( $m['message'], 'Vi har byttet' ); } ) ), 'customer note reaches the customer by email' );
 $before = hooks_named( 'lp_missing_before_apply_decision' );
 $after  = hooks_named( 'lp_missing_after_apply_decision' );

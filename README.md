@@ -8,13 +8,15 @@ Requires WordPress 6.5+, WooCommerce (HPOS and legacy order storage are both sup
 
 Upload the whole plugin folder (it contains `missing-product-woocommerce-alternative.php`, `includes/`, `templates/`, `assets/`) to `wp-content/plugins/` and activate it. On activation a "Velg erstatning" page with the `[lp_missing_items]` portal is created if no portal page is configured.
 
-Settings: **WooCommerce → Missing Items Settings**. Email texts: **WooCommerce → Settings → Emails**.
+Settings: **WooCommerce → Missing Items Settings**. Email texts: **WooCommerce → Settings → Emails**. The order list has the views «Missing items», «Customer answered» and «Needs follow-up».
+
+The admin screens, staff emails and order notes are in English with a Norwegian (bokmål) translation in `languages/` (used when the site or user language is Norsk bokmål); customer texts are written in Norwegian.
 
 ## How it works
 
-1. **Mark missing** – in the order's "Missing / Problem Items" box: tick the line, set the missing quantity (0 = whole line), write a note for the customer and pick alternatives (WooCommerce product search). Saving the order emails the customer a link to the portal.
+1. **Mark missing** – in the order's "Missing items" box, press «Missing» on the line, set how many are missing, pick replacements (WooCommerce product search; other sizes/variants are suggested automatically) and optionally a message (one-click texts). «Save» in the box saves the order and emails the customer a link to the portal.
 2. **Customer chooses** – the portal shows each missing line with the alternatives, prices and the price difference (frozen when the customer chooses). The customer confirms their billing email once per browser, and can change the choice until staff apply it. Cancelled, refunded, failed or trashed orders cannot be changed from the portal.
-3. **Staff apply** – from the box: replace the missing quantity, add the alternative as an extra line, remove the quantity from the order, or record a refund. A more expensive alternative creates a separate surcharge order (with VAT) unless the store covers the difference. Apply buttons are tied to the choice shown on the screen: if the customer changes their mind after the page was loaded, nothing is applied and staff are asked to check the new choice. Saving an order screen that is out of date (e.g. the deadline job or another user already resolved a line) leaves those lines alone and says so.
+3. **Staff apply** – each line shows where it stands (waiting, answered, needs follow-up, done) and one button that says what happens, e.g. «Replace the missing item» with the price consequence. Options: replace the missing quantity, add the alternative as an extra line, remove the quantity from the order, or record a refund. A more expensive alternative creates a separate surcharge order (with VAT) unless the store covers the difference. Apply buttons are tied to the choice shown on the screen: if the customer changes their mind after the page was loaded, nothing is applied and staff are asked to check the new choice. Saving an order screen that is out of date (e.g. the deadline job or another user already resolved a line) leaves those lines alone and says so.
 4. **Reminders, deadline and cleanup** – reminders (one per order, within the configured hours), escalation to staff, an optional automatic action when the customer does not answer by the deadline, and automatic cleanup of resolved data. The deadline starts when the customer is emailed; a line whose missing quantity or stock changed after that is left to staff. Scheduling uses WooCommerce's Action Scheduler (WooCommerce → Status → Scheduled Actions, group `lp-missing`).
 
 ### Money and VAT
@@ -60,7 +62,8 @@ Filters:
 | `lp_missing_customer_note` | `$text, $order, $context` | Customer-visible order note written after an apply. |
 | `lp_missing_email_lines` | `$lines, $order, $awaiting_only` | Lines listed in customer emails. |
 | `lp_missing_next_reminder_time` | `$time, $from` | When the next reminder goes out (default: pushed into the reminder hours). |
-| `lp_missing_variant_suggestions` | `$products, $item, $order, $qty` | "Same product, other variant" suggestions. |
+| `lp_missing_variant_suggestions` | `$products, $item, $order, $qty` | "Other sizes/variants" suggestions. |
+| `lp_missing_note_presets` | `$presets` | One-click customer messages in the order screen box. |
 | `lp_missing_portal_base_url` | `$url` | Base URL of customer links. |
 | `lp_missing_portal_rate_limit` | `array( 'max', 'window' )` | Portal save rate limit. |
 | `lp_missing_portal_session_ttl` | `$seconds` | Lifetime of the portal session cookie. |

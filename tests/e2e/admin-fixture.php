@@ -92,6 +92,12 @@ $v_item = afx_mark( $vorder, array( 'qty_missing' => 2, 'alternatives' => array(
 $ready      = afx_order( $base, 2 );
 $ready_item = afx_mark( $ready, array( 'qty_missing' => 1, 'alternatives' => array( $dear->get_id() ), 'status' => 'alt_pending', 'selected_alt_id' => $dear->get_id(), 'qty_alt' => 1, 'decision_made_at' => time() ) );
 
+// 4) Nothing missing yet (the simple "Missing" flow).
+$fresh = afx_order( $base, 2 );
+$fresh->add_product( wc_get_product( $dear->get_id() ), 1 );
+$fresh->calculate_totals( true );
+$fresh->save();
+
 $open = wc_get_order( $open->get_id() );
 echo wp_json_encode(
 	array(
@@ -110,6 +116,9 @@ echo wp_json_encode(
 		'vEdit'      => $vorder->get_edit_order_url(),
 		'variants'   => $var,
 		'ready'      => $ready->get_id(),
+		'fresh'      => $fresh->get_id(),
+		'freshItem'  => array_keys( wc_get_order( $fresh->get_id() )->get_items() )[0],
+		'freshEdit'  => wc_get_order( $fresh->get_id() )->get_edit_order_url(),
 		'readyCount' => LP_Missing_Orders::count_orders_ready_for_staff(),
 		'openCount'  => LP_Missing_Orders::count_orders_with_open_missing(),
 		'listReady'  => add_query_arg( 'lp_missing_view', 'ready', LP_Missing_Util::get_orders_list_url() ),

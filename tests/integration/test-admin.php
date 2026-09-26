@@ -172,8 +172,8 @@ apply_via_handler( $o->get_id(), $iid, 'delete', 'reduce' );
 t_ok( 0 === strpos( logged( 'Staff clicked apply.' ), 'warning ' ), 'failed apply (nothing left to apply) logged as warning' );
 
 $applied_box = render_box( $o );
-t_ok( false !== strpos( $applied_box, 'Applied: line removed/refunded.' ) && false === strpos( $applied_box, 'Not marked as missing' ), 'applied line keeps its applied status in the box' );
-t_ok( (bool) preg_match( '/class="lp-missing-history">[^<]*applied \d\d\.\d\d/', $applied_box ), 'applied line history says when it was applied' );
+t_ok( false !== strpos( $applied_box, 'lp-line--done' ) && false !== strpos( $applied_box, 'Removed from the order' ), 'applied line keeps its applied status in the box' );
+t_ok( (bool) preg_match( '/class="lp-line__done">.*Removed from the order · \d\d\.\d\d/', $applied_box ), 'applied line says when it was applied' );
 t_ok( false === strpos( $applied_box, 'lp-missing-apply ' ), 'no apply buttons on an applied line' );
 
 // Upgrade step backfills the flag on orders saved before it existed.
@@ -203,7 +203,7 @@ t_eq( count( $open_ids ), LP_Missing_Orders::count_orders_with_open_missing(), '
 reset_request();
 $views = LP_Missing_Admin_Orders_List::add_missing_orders_view( array( 'all' => '<a>All</a>' ) );
 t_ok( isset( $views['lp_missing'], $views['lp_missing_ready'] ), 'both views added' );
-t_eq( wp_json_encode( array( 'all', 'lp_missing', 'lp_missing_ready' ) ), wp_json_encode( array_keys( $views ) ), '"Customer answered" comes right after "Missing items"' );
+t_eq( wp_json_encode( array( 'all', 'lp_missing', 'lp_missing_ready' ) ), wp_json_encode( array_slice( array_keys( $views ), 0, 3 ) ), '"Customer answered" comes right after "Missing items"' );
 t_ok( false !== strpos( $views['lp_missing_ready'], 'Customer answered (' . count( $ready_ids ) . ')' ), 'ready view label with count: ' . wp_strip_all_tags( $views['lp_missing_ready'] ) );
 t_ok( false !== strpos( $views['lp_missing_ready'], 'lp_missing_view=ready' ), 'ready view links to lp_missing_view=ready' );
 t_ok( false !== strpos( $views['lp_missing_ready'], $hpos ? 'page=wc-orders' : 'post_type=shop_order' ), 'ready view links to the list of the active storage' );
@@ -235,7 +235,7 @@ t_ok( false !== strpos( $col, 'Customer answered – ready to apply' ) && false 
 $o3   = make_order( $A, 1 );
 $iid3 = first_item_id( $o3 );
 admin_save( $o3, array( $iid3 => array( 'missing' => '1', 'qty_missing' => '1' ) ) );
-t_ok( false !== strpos( column_html( $o3 ), 'Awaiting resolution' ), 'waiting order shows "Awaiting resolution"' );
+t_ok( false !== strpos( column_html( $o3 ), 'Waiting for the customer' ), 'waiting order shows "Waiting for the customer"' );
 $tmp = wc_get_order( $o2->get_id() );
 $tmp->update_meta_data( '_lp_missing_needs_attention', 'yes' );
 $tmp->save();
@@ -259,7 +259,7 @@ $deadline = $now + 3 * DAY_IN_SECONDS;
 $data     = array_merge( LP_Missing_Line::default_item_data(), array( 'missing' => true, 'qty_missing' => 1, 'status' => 'pending', 'notified_at' => $notified, 'reminder_count' => 2, 'first_missing_at' => $notified, 'deadline_at' => $deadline ) );
 
 $parts = LP_Missing_Admin_Metabox::get_history_parts( $data, $next );
-t_eq( 'Notified ' . $oslo( $notified, 'd.m' ), $parts[0], 'notified date in the site time zone' );
+t_eq( 'emailed ' . $oslo( $notified, 'd.m' ), $parts[0], 'emailed date in the site time zone' );
 t_eq( '2/3 reminders', $parts[1], 'reminders sent / maximum' );
 t_eq( 'next ' . $oslo( $next, 'd.m H:i' ), $parts[2], 'next reminder with time (site time zone)' );
 t_eq( 3, count( $parts ), 'no deadline part while no deadline action is configured' );
@@ -269,17 +269,17 @@ LP_Missing_Settings::flush();
 $parts = LP_Missing_Admin_Metabox::get_history_parts( $data, $next );
 t_eq( 'deadline ' . $oslo( $deadline, 'd.m H:i' ), end( $parts ), 'deadline shown when an automatic action is configured' );
 $line = implode( ' · ', $parts );
-t_eq( 'Notified ' . $oslo( $notified, 'd.m' ) . ' · 2/3 reminders · next ' . $oslo( $next, 'd.m H:i' ) . ' · deadline ' . $oslo( $deadline, 'd.m H:i' ), $line, 'one history line' );
+t_eq( 'emailed ' . $oslo( $notified, 'd.m' ) . ' · 2/3 reminders · next ' . $oslo( $next, 'd.m H:i' ) . ' · deadline ' . $oslo( $deadline, 'd.m H:i' ), $line, 'one history line' );
 
 $chosen = array_merge( $data, array( 'status' => 'alt_pending', 'decision_made_at' => $now - DAY_IN_SECONDS ) );
 $parts  = LP_Missing_Admin_Metabox::get_history_parts( $chosen, $next );
-t_ok( in_array( 'customer chose ' . $oslo( $now - DAY_IN_SECONDS, 'd.m' ), $parts, true ), 'customer decision date shown' );
+t_ok( in_array( 'answered ' . $oslo( $now - DAY_IN_SECONDS, 'd.m' ), $parts, true ), 'customer decision date shown' );
 t_ok( ! preg_grep( '/^(next|deadline) /', $parts ), 'no next reminder or deadline once the customer has chosen' );
 $parts = LP_Missing_Admin_Metabox::get_history_parts( array_merge( $data, array( 'status' => 'declined', 'decision_made_at' => 0 ) ), $next );
-t_ok( in_array( 'customer declined', $parts, true ), 'declined line without a date' );
+t_ok( in_array( 'answered', $parts, true ), 'declined line without a date' );
 $parts = LP_Missing_Admin_Metabox::get_history_parts( array_merge( $data, array( 'notified_at' => 0, 'needs_attention' => true ) ), 0 );
-t_eq( 'No notification recorded', $parts[0], 'line without a recorded notification' );
-t_ok( in_array( 'escalated to staff', $parts, true ) && ! preg_grep( '/^next /', $parts ), 'escalated line, no next reminder when none is scheduled' );
+t_eq( 'not emailed yet', $parts[0], 'line without a recorded notification' );
+t_ok( ! preg_grep( '/^next /', $parts ), 'escalated line, no next reminder when none is scheduled' );
 $parts = LP_Missing_Admin_Metabox::get_history_parts( array_merge( $data, array( 'missing' => false, 'status' => 'alt_applied', 'resolved_at' => $now ) ), $next );
 t_ok( in_array( 'applied ' . $oslo( $now, 'd.m' ), $parts, true ) && ! preg_grep( '/^(next|deadline) /', $parts ), 'resolved line shows when it was applied' );
 t_eq( wp_json_encode( array() ), wp_json_encode( LP_Missing_Admin_Metabox::get_history_parts( array_merge( $data, array( 'missing' => false, 'status' => 'cleared' ) ), $next ) ), 'no history for lines that are not missing' );
@@ -293,7 +293,7 @@ admin_save( $o4, array( $iid4 => array( 'missing' => '1', 'qty_missing' => '1', 
 $next4 = LP_Missing_Lifecycle::get_next_reminder_timestamp( wc_get_order( $o4->get_id() ) );
 $box   = render_box( $o4 );
 t_ok( $next4 > 0, 'a reminder is scheduled for the new case' );
-t_ok( false !== strpos( $box, 'class="lp-missing-history"' ), 'history line rendered for the missing line' );
+t_ok( false !== strpos( $box, 'class="lp-missing-history lp-line__facts"' ), 'history line rendered for the missing line' );
 t_ok( false !== strpos( $box, 'next ' . $oslo( $next4, 'd.m H:i' ) ), 'history shows the scheduled reminder' );
 t_ok( false !== strpos( $box, '0/3 reminders' ), 'history shows the reminder count' );
 t_eq( 1, substr_count( $box, 'lp-missing-history' ), 'only missing lines get a history line' );
@@ -499,7 +499,7 @@ t_eq( 1, LP_Missing_Admin_Alternatives::attribute_distance( array( 'size' => 'M'
 t_eq( 0, LP_Missing_Admin_Alternatives::attribute_distance( array( 'size' => 'M', 'color' => 'Red' ), array( 'size' => 'M', 'color' => '' ) ), '"any" attribute matches' );
 
 $box_v = render_box( $ov );
-t_ok( false !== strpos( $box_v, '<button type="button" class="button lp-missing-variants" data-item-id="' . $ivid . '">Same product, other variant</button>' ), 'variant button rendered for the variation line' );
+t_ok( false !== strpos( $box_v, '<button type="button" class="button lp-missing-variants" data-item-id="' . $ivid . '">Find other sizes/variants</button>' ), 'variant button rendered for the variation line' );
 
 $nonce_v = LP_Missing_Admin_Alternatives::create_nonce( $ov->get_id() );
 $res     = admin_ajax( 'lp_missing_variant_suggestions', array( 'nonce' => $nonce_v, 'order_id' => $ov->get_id(), 'item_id' => $ivid, 'qty' => 2 ) );
@@ -581,5 +581,74 @@ if ( ! $hpos ) {
 unset( $GLOBALS['current_screen'] );
 
 update_option( 'timezone_string', $orig_tz );
+
+// ---------- Simple order box ----------
+echo "\n[UI] Simple order box\n";
+$ou  = make_order( $A, 2 );
+$ou->add_product( wc_get_product( $C->get_id() ), 1 );
+$ou->calculate_totals( true );
+$ou->save();
+$uids = array_keys( wc_get_order( $ou->get_id() )->get_items() );
+$box  = render_box( $ou );
+t_ok( false !== strpos( $box, 'lp-summary__empty' ), 'nothing missing: one short sentence on top' );
+t_eq( 2, substr_count( $box, 'class="button lp-mark"' ), 'every line has a «Missing» button' );
+t_eq( 2, substr_count( $box, '<div class="lp-new-case" hidden="hidden">' ), 'case fields stay hidden until «Missing» is pressed' );
+t_ok( (bool) preg_match( '/name="lp_missing_items\[' . $uids[0] . '\]\[qty_missing\]" value="1"/', $box ), 'a new case starts at 1 missing' );
+t_ok( (bool) preg_match( '/name="lp_missing_items\[' . $uids[0] . '\]\[propose_delete\]" value="1"  ?checked/', $box ), 'removal is offered by default' );
+t_ok( false !== strpos( $box, 'class="button-link lp-preset" data-text="Utsolgt hos leverandøren."' ), 'one-click customer messages' );
+t_ok( false !== strpos( $box, 'lp-savebar' ) && false !== strpos( $box, 'button button-primary lp-save' ), 'save bar with a save button' );
+t_ok( false === strpos( $box, 'lp-missing-admin-actions' ), 'no customer link tools before there is a case' );
+
+admin_save( $ou, array( $uids[0] => array( 'missing' => '1', 'qty_missing' => '1', 'alternatives' => array( $B->get_id() ), 'propose_delete' => '1' ), $uids[1] => array( 'missing' => '1', 'qty_missing' => '1', 'propose_delete' => '1' ) ) );
+$box = render_box( $ou );
+t_ok( false !== strpos( $box, 'lp-badge--waiting' ) && false !== strpos( $box, 'Waiting for the customer' ), 'waiting line has a status badge' );
+t_ok( (bool) preg_match( '/<input type="checkbox" class="lp-missing-toggle" name="lp_missing_items\[' . $uids[0] . '\]\[missing\]" value="1" checked="checked" hidden="hidden" \/>/', $box ), 'open case keeps its missing flag (hidden)' );
+t_ok( false !== strpos( $box, 'lp-cancel-case' ) && false !== strpos( $box, 'Change or cancel' ), 'change/cancel tucked away' );
+t_ok( false !== strpos( $box, 'Missing 1 of 2' ), 'facts line says how many are missing' );
+t_ok( false !== strpos( $box, '2 waiting for the customer' ), 'summary counts waiting lines' );
+
+set_line_status( $ou, $uids[0], array( 'status' => 'alt_pending', 'selected_alt_id' => $B->get_id(), 'qty_alt' => 1, 'decision_made_at' => time() ) );
+set_line_status( $ou, $uids[1], array( 'status' => 'delete_pending', 'decision_made_at' => time() ) );
+$box = render_box( $ou );
+t_ok( false !== strpos( $box, '1 × ' . $B->get_name() ), 'the chosen replacement is shown' );
+t_ok( false !== strpos( $box, 'more – the customer gets a separate invoice for it.' ), 'what it means for the price' );
+t_ok( (bool) preg_match( '/class="button button-primary lp-missing-apply lp-missing-confirm" href="[^"]*apply_mode=replace[^"]*" data-confirm="Replace 1 × [^"]*The customer is sent an invoice of[^"]*">Replace the missing item<\/a>/', $box ), 'one primary button, with a confirmation that says what happens' );
+t_ok( (bool) preg_match( '/class="button-link lp-missing-apply lp-missing-confirm" href="[^"]*apply_mode=add/', $box ), '«add as a separate line» is a quiet link' );
+t_ok( (bool) preg_match( '/apply_mode=reduce[^"]*" data-confirm="[^"]*">Remove from the order \(−[^)]+\)<\/a>/', $box ), 'removal button shows the amount' );
+t_ok( (bool) preg_match( '/class="button-link lp-missing-apply lp-missing-confirm" href="[^"]*apply_mode=refund/', $box ), 'refund is a quiet link' );
+t_ok( false !== strpos( $box, '2 answered – ready to apply' ), 'summary counts answered lines' );
+
+apply_via_handler( $ou->get_id(), $uids[0], 'alternative', 'replace' );
+$box = render_box( $ou );
+t_ok( (bool) preg_match( '/class="lp-line__done">.*Replaced with 1 × ' . preg_quote( $B->get_name(), '/' ) . '/', $box ), 'done line says what it was replaced with' );
+t_ok( false !== strpos( $box, 'Replacement for ' . $A->get_name() ), 'the new line says what it replaces' );
+$note = wc_get_order_notes( array( 'order_id' => $ou->get_id(), 'limit' => 1 ) );
+$apply_note = '';
+foreach ( wc_get_order_notes( array( 'order_id' => $ou->get_id() ) ) as $n ) {
+	if ( false !== strpos( $n->content, 'Replacement applied' ) ) {
+		$apply_note = $n->content;
+	}
+}
+t_ok( 0 === strpos( $apply_note, 'Replacement applied (replaced on the line): 1 × ' . $A->get_name() . ' → ' . $B->get_name() . '.' ) && strlen( wp_strip_all_tags( $apply_note ) ) < 260, 'short order note: ' . wp_strip_all_tags( $apply_note ) );
+
+$hidden = apply_filters( 'woocommerce_hidden_order_itemmeta', array() );
+t_ok( in_array( '_lp_missing_alt_pricing_source', $hidden, true ) && in_array( '_lp_missing_alt_original_item_id', $hidden, true ) && in_array( '_lp_missing_moved_qty', $hidden, true ), 'internal line fields are hidden on the order screen' );
+
+// Norwegian admin.
+$nb = function () {
+	return 'nb_NO';
+};
+unload_textdomain( 'lp-missing' );
+add_filter( 'locale', $nb );
+add_filter( 'determine_locale', $nb );
+t_eq( 'Manglende varer', __( 'Missing / Problem Items', 'lp-missing' ), 'box title in Norwegian' );
+t_eq( '2 har svart – klare til å utføre', sprintf( _n( '%d answered – ready to apply', '%d answered – ready to apply', 2, 'lp-missing' ), 2 ), 'plural forms in Norwegian' );
+$box_nb = render_box( $ou );
+t_ok( false !== strpos( $box_nb, 'Hvor mange mangler?' ) && false !== strpos( $box_nb, 'Byttet med' ), 'the box is Norwegian' );
+remove_filter( 'locale', $nb );
+remove_filter( 'determine_locale', $nb );
+unload_textdomain( 'lp-missing' );
+t_eq( 'Missing / Problem Items', __( 'Missing / Problem Items', 'lp-missing' ), 'back to English' );
+
 restore_settings( $orig_settings );
 t_summary();

@@ -38,11 +38,13 @@ const until = (page, fn, arg) => page.waitForFunction(fn, arg, { timeout: 15000 
   ok(await page.locator(`script[src*="assets/js/admin.js?ver=${fx.version}"]`).count() === 1, 'admin.js enqueued with the plugin version');
   ok(await page.evaluate(() => typeof window.lpMissingAdminApi === 'object' && !!window.lpMissingAdmin && !!window.lpMissingAdmin.ajaxUrl), 'admin.js runs and has its settings');
   ok(await box.locator('[style]').count() === 0, 'no inline styles in the box');
-  ok(await page.evaluate(() => getComputedStyle(document.querySelector('.lp-missing-status')).backgroundColor) === 'rgb(248, 248, 248)', 'styles come from admin.css');
+  ok(await page.evaluate(() => getComputedStyle(document.querySelector('.lp-badge--waiting')).backgroundColor) === 'rgb(252, 249, 232)', 'styles come from admin.css');
 
   // S4 history line.
   const history = (await box.locator('.lp-missing-history').first().innerText()).trim();
-  ok(/^Notified \d\d\.\d\d · 0\/\d+ reminders · next \d\d\.\d\d \d\d:\d\d$/.test(history), 'history line: ' + history);
+  ok(/^Missing \d+ of \d+ · emailed \d\d\.\d\d · 0\/\d+ reminders · next \d\d\.\d\d \d\d:\d\d$/.test(history), 'history line: ' + history);
+  // The case fields of an open case sit under «Change or cancel».
+  await box.locator(`.lp-missing-item[data-item-id="${fx.openItem}"] details.lp-edit > summary`).click();
 
   // S9 preview on load.
   const items = box.locator(`.lp-missing-item[data-item-id="${fx.openItem}"] .lp-alt-list li`);
@@ -92,6 +94,7 @@ const until = (page, fn, arg) => page.waitForFunction(fn, arg, { timeout: 15000 
   ok(popup.url() === href, 'new tab opens the preview URL');
   await popup.close();
 
+  await box.locator('details.lp-more > summary').click();
   const revoke = box.locator('a.lp-missing-revoke');
   const revokeHref = await revoke.getAttribute('href');
   ok(revokeHref.includes('admin-post.php') && revokeHref.includes('action=lp_missing_revoke_links') && revokeHref.includes(`order_id=${fx.open}`) && /_wpnonce=[a-f0-9]+/.test(revokeHref), 'revoke link is a nonce\'d admin-post action');
@@ -112,6 +115,7 @@ const until = (page, fn, arg) => page.waitForFunction(fn, arg, { timeout: 15000 
   const vbox = page.locator(`#lp_missing_metabox .lp-missing-item[data-item-id="${fx.vItem}"]`);
   const vbtn = vbox.locator('button.lp-missing-variants');
   ok(await vbtn.count() === 1, 'variant button shown for a variation line');
+  await vbox.locator('details.lp-edit > summary').click();
   resp = page.waitForResponse((r) => r.url().includes('admin-ajax.php') && r.request().postData().includes('lp_missing_variant_suggestions'));
   const previewResp = page.waitForResponse((r) => r.url().includes('admin-ajax.php') && r.request().postData().includes('lp_missing_preview_alternatives'));
   await vbtn.click();
@@ -129,10 +133,10 @@ const until = (page, fn, arg) => page.waitForFunction(fn, arg, { timeout: 15000 
   ok((await vbox.locator('.lp-missing-variants-status').innerText()).includes('maximum'), 'a full list is not extended');
   ok(await page.evaluate((id) => window.lpMissingAdminApi.addAlternatives(window.jQuery(`#lp-missing-alt-${id}`), [{ id: 999999, text: 'X' }]), fx.vItem) === 0, 'never more than the maximum');
 
-  const saveBtn = page.locator('button[name=save], input[name=save]').first();
-  await Promise.all([page.waitForNavigation(), saveBtn.click()]);
+  ok(await page.locator('#lp_missing_metabox .lp-savebar').isVisible(), 'save bar appears after a change');
+  await Promise.all([page.waitForNavigation(), page.locator('#lp_missing_metabox .lp-save').click()]);
   const url = page.url();
-  ok(url.includes('action=edit') && (url.includes('id=' + fx.vorder) || url.includes('post=' + fx.vorder)), 'Update stays on the order: ' + url);
+  ok(url.includes('action=edit') && (url.includes('id=' + fx.vorder) || url.includes('post=' + fx.vorder)), 'saving from the box saves the order and stays on it: ' + url);
   ok((await page.locator('#message, .notice').allInnerTexts()).join(' ').match(/Order updated|updated/i), 'WooCommerce reports the order as updated');
   const saved = await page.locator(`#lp-missing-alt-${fx.vItem}`).evaluate((s) => Array.from(s.selectedOptions).map((o) => Number(o.value)));
   ok(saved.join() === selected.join(), 'suggested variants were saved with the order');
@@ -152,7 +156,41 @@ const until = (page, fn, arg) => page.waitForFunction(fn, arg, { timeout: 15000 
   ok(await state.evaluate((el) => el.classList.contains('lp-missing-state--ready') && getComputedStyle(el).color === 'rgb(0, 112, 23)'), 'ready state is green (admin.css on the list)');
   // Search for the order so the check does not depend on list paging on busy test sites.
   await page.goto(fx.listOpen + (fx.listOpen.includes('?') ? '&' : '?') + 's=' + fx.vorder);
-  ok((await row(page, fx.vorder).locator('.lp-missing-state').innerText({ timeout: 10000 })).includes('Awaiting resolution'), 'open view lists waiting orders as "Awaiting resolution"');
+  ok((await row(page, fx.vorder).locator('.lp-missing-state').innerText({ timeout: 10000 })).includes('Waiting for the customer'), 'open view lists waiting orders as "Waiting for the customer"');
+
+  console.log('[Admin] Simple box: «Missing», stepper, quick text, save, cancel');
+  await page.goto(fx.freshEdit);
+  const fline = page.locator(`#lp_missing_metabox .lp-line[data-item-id="${fx.freshItem}"]`);
+  ok(await page.locator('#lp_missing_metabox .lp-summary__empty').isVisible(), 'box says nothing is missing');
+  ok(!(await fline.locator('.lp-new-case').isVisible()), 'case fields hidden until «Missing» is pressed');
+  ok(!(await page.locator('#lp_missing_metabox .lp-savebar').isVisible()), 'no save bar before a change');
+  await fline.locator('.lp-mark').click();
+  ok(await fline.locator('.lp-new-case').isVisible(), '«Missing» opens the case fields');
+  ok(await fline.evaluate((el) => el.classList.contains('is-marked')), 'the line is marked');
+  const fbar = page.locator('#lp_missing_metabox .lp-savebar');
+  ok(await fbar.isVisible() && (await fbar.innerText()).includes('email the customer'), 'save bar says the customer will be emailed');
+  const fqty = fline.locator('.lp-missing-qty');
+  ok(await fqty.inputValue() === '1', 'starts at 1 missing');
+  await fline.locator('.lp-step[data-step="1"]').click();
+  await fline.locator('.lp-step[data-step="1"]').click();
+  ok(await fqty.inputValue() === '2', 'the stepper stops at the ordered quantity');
+  await fline.locator('.lp-step[data-step="-1"]').click();
+  ok(await fqty.inputValue() === '1', 'and goes down again');
+  await fline.locator('.lp-preset').first().click();
+  ok(await fline.locator('textarea[name$="[notes]"]').inputValue() === 'Utsolgt hos leverandøren.', 'quick text fills the message');
+  await Promise.all([page.waitForNavigation(), fbar.locator('.lp-save').click()]);
+  const fline2 = page.locator(`#lp_missing_metabox .lp-line[data-item-id="${fx.freshItem}"]`);
+  ok((await fline2.locator('.lp-badge').innerText()).includes('Waiting for the customer'), 'after saving the line waits for the customer');
+  ok((await fline2.locator('.lp-line__facts').innerText()).startsWith('Missing 1 of 2'), 'facts line after saving');
+  await fline2.locator('details.lp-edit > summary').click();
+  await fline2.locator('.lp-cancel-case').click();
+  ok(await fline2.locator('.lp-cancel-note').isVisible() && await fline2.evaluate((el) => el.classList.contains('is-cancelling')), 'cancel shows what will happen');
+  await fline2.locator('.lp-undo-cancel').click();
+  ok(!(await fline2.locator('.lp-cancel-note').isVisible()) && await fline2.locator('input.lp-missing-toggle').isChecked(), 'undo keeps the case');
+  await fline2.locator('.lp-cancel-case').click();
+  await Promise.all([page.waitForNavigation(), page.locator('#lp_missing_metabox .lp-save').click()]);
+  const fline3 = page.locator(`#lp_missing_metabox .lp-line[data-item-id="${fx.freshItem}"]`);
+  ok(await fline3.locator('.lp-mark').isVisible() && await fline3.locator('.lp-badge').count() === 0, 'cancelled case: the line is back to «Missing»');
 
   ok(scriptErrors.length === 0, 'no script errors from admin.js ' + scriptErrors.join(' | '));
   await browser.close();

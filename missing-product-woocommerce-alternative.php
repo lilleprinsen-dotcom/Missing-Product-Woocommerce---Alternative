@@ -4,6 +4,7 @@
  * Description: Handles missing items, alternatives, and customer responses for WooCommerce orders.
  * Version: 1.3.0
  * Text Domain: lp-missing
+ * Domain Path: /languages
  * Requires Plugins: woocommerce
  * Requires PHP: 7.4
  */
@@ -60,6 +61,16 @@ if ( ! function_exists( 'lp_missing_bootstrap_plugin' ) ) {
 }
 
 add_action( 'plugins_loaded', 'lp_missing_bootstrap_plugin', 20 );
+
+// Translations (languages/: Norwegian for the admin screens, staff emails and order notes). Loaded on init, as
+// WordPress expects; customer texts are written in Norwegian.
+add_action(
+    'init',
+    function() {
+        load_plugin_textdomain( 'lp-missing', false, dirname( plugin_basename( __FILE__ ) ) . '/languages' );
+    },
+    0
+);
 
 // Creates the "Velg erstatning" customer portal page when no valid portal page is configured.
 register_activation_hook( __FILE__, array( 'LP_Missing_Portal_Setup', 'activate' ) );

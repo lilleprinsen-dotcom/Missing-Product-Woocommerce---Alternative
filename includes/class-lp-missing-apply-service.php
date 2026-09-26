@@ -127,11 +127,9 @@ class LP_Missing_Apply_Service {
         if ( 'replace' === $mode ) {
             $new_qty = max( 0, $item->get_quantity() - $qty_alt );
             $item->set_quantity( $new_qty );
-            $line_result = $new_qty > 0 ? __( 'original line quantity and totals reduced', 'lp-missing' ) : __( 'original line removed', 'lp-missing' );
         } else {
             // The original line keeps its quantity for reference; remember how many units no longer carry a price.
             $item->update_meta_data( LP_Missing_Plugin::MOVED_QTY_META, absint( $item->get_meta( LP_Missing_Plugin::MOVED_QTY_META, true ) ) + $qty_alt );
-            $line_result = __( 'original line totals reduced', 'lp-missing' );
         }
 
         $alt_share = $share;
@@ -198,22 +196,23 @@ class LP_Missing_Apply_Service {
         LP_Missing_Pricing::recalculate_order_totals( $order );
 
         $note_parts   = array();
-        $note_parts[] = sprintf( __( 'Applied customer-selected alternative %1$s (Qty %2$d).', 'lp-missing' ), $alt_product->get_name(), $qty_alt );
-        $note_parts[] = sprintf( __( 'Mode: %s.', 'lp-missing' ), 'replace' === $mode ? __( 'Replace', 'lp-missing' ) : __( 'Add new line', 'lp-missing' ) );
-        $note_parts[] = sprintf( __( 'Original product: %1$s. Alternative product: %2$s. Qty: %3$d.', 'lp-missing' ), $original_name, $alt_product->get_name(), $qty_alt );
-        $note_parts[] = sprintf( __( 'Missing qty before apply: %1$d. Applied qty: %2$d. Remaining unresolved qty: %3$d.', 'lp-missing' ), $previous_missing_qty, $qty_alt, $remaining_missing_qty );
-        $note_parts[] = sprintf( __( 'Line update result: %s.', 'lp-missing' ), $line_result );
-        $note_parts[] = sprintf( __( 'Frozen unit amount used for comparison: original %1$s, alternative %2$s (captured at customer decision time).', 'lp-missing' ), wc_price( $original_unit_incl, array( 'currency' => $order->get_currency() ) ), wc_price( $alt_unit_incl, array( 'currency' => $order->get_currency() ) ) );
-        $note_parts[] = sprintf( __( 'Final delta: %s.', 'lp-missing' ), wc_price( $final_delta, array( 'currency' => $order->get_currency() ) ) );
-        $note_parts[] = sprintf( __( 'Price handling: %s.', 'lp-missing' ), 'store_covers' === $surcharge_result['mode'] ? __( 'Store covers any extra cost', 'lp-missing' ) : __( 'Customer is charged delta via separate surcharge order when positive', 'lp-missing' ) );
-        if ( ! $fully_resolved ) {
-            $note_parts[] = __( 'Missing item remains open with remaining quantity awaiting new customer decision.', 'lp-missing' );
-        } else {
-            $note_parts[] = __( 'Missing item is fully resolved.', 'lp-missing' );
-        }
+        $note_parts[] = sprintf(
+            /* translators: 1: how it was applied, 2: quantity, 3: ordered product, 4: replacement product */
+            __( 'Replacement applied (%1$s): %2$d × %3$s → %4$s.', 'lp-missing' ),
+            'replace' === $mode ? __( 'replaced on the line', 'lp-missing' ) : __( 'added as a new line', 'lp-missing' ),
+            $qty_alt,
+            $original_name,
+            $alt_product->get_name()
+        );
         if ( ! empty( $surcharge_result['summary_note'] ) ) {
             $note_parts[] = $surcharge_result['summary_note'];
         }
+        if ( ! $fully_resolved ) {
+            /* translators: %d: quantity */
+            $note_parts[] = sprintf( __( '%d still waiting for the customer to choose.', 'lp-missing' ), $remaining_missing_qty );
+        }
+        /* translators: 1: original unit price, 2: replacement unit price */
+        $note_parts[] = sprintf( __( '(Prices locked when the customer chose: %1$s → %2$s per unit.)', 'lp-missing' ), LP_Missing_Util::plain_price( $original_unit_incl, $order ), LP_Missing_Util::plain_price( $alt_unit_incl, $order ) );
         $order->add_order_note( implode( ' ', $note_parts ) );
         self::add_customer_note( $order, self::describe_alternative_for_customer( $order, $original_name, $alt_product->get_name(), $qty_alt, $remaining_missing_qty, $final_delta, $surcharge_result ), $context );
 
@@ -248,7 +247,6 @@ class LP_Missing_Apply_Service {
         $gross       = wc_format_decimal( (float) $share['total'] + array_sum( array_map( 'floatval', $share['taxes']['total'] ) ), wc_get_price_decimals() );
         $item_name   = $item->get_name();
         $new_qty     = $item->get_quantity();
-        $line_result = __( 'line unchanged', 'lp-missing' );
         $stock_baseline = $data;
 
         if ( 'refund' === $mode ) {
@@ -282,12 +280,10 @@ class LP_Missing_Apply_Service {
                 // A full refund moves the order to "refunded", which may already have released the stock lock.
                 $stock_baseline = LP_Missing_Line::get_item_data( $item );
             }
-            $line_result = sprintf( __( 'refund of %s recorded (line kept for accounting; pay it back via the payment provider)', 'lp-missing' ), wp_strip_all_tags( wc_price( $refund_amount, array( 'currency' => $order->get_currency() ) ) ) );
         } else {
             LP_Missing_Pricing::subtract_share_from_item( $item, $share );
             $new_qty = max( 0, $item->get_quantity() - $qty_remove );
             $item->set_quantity( $new_qty );
-            $line_result = $new_qty > 0 ? __( 'line quantity and totals reduced', 'lp-missing' ) : __( 'line removed', 'lp-missing' );
         }
 
         $new_data = $data;
@@ -312,15 +308,14 @@ class LP_Missing_Apply_Service {
             LP_Missing_Pricing::recalculate_order_totals( $order );
         }
 
-        $note = sprintf(
-            __( 'Applied deletion for %1$s. Missing qty before apply: %2$d. Applied qty: %3$d. Remaining unresolved qty: %4$d. Mode: %5$s. Result: %6$s.', 'lp-missing' ),
-            $item->get_name(),
-            $previous_missing_qty,
-            $qty_remove,
-            0,
-            'refund' === $mode ? __( 'Refund', 'lp-missing' ) : __( 'Reduce order totals', 'lp-missing' ),
-            $line_result
-        );
+        $amount_text = LP_Missing_Util::plain_price( $gross, $order );
+        if ( 'refund' === $mode ) {
+            /* translators: 1: quantity, 2: product, 3: amount */
+            $note = sprintf( __( 'Refund recorded: %1$d × %2$s (%3$s). Pay it back in the payment provider.', 'lp-missing' ), $qty_remove, $item_name, $amount_text );
+        } else {
+            /* translators: 1: quantity, 2: product, 3: amount */
+            $note = sprintf( __( 'Removed from the order: %1$d × %2$s (−%3$s).', 'lp-missing' ), $qty_remove, $item_name, $amount_text );
+        }
         $order->add_order_note( $note );
         self::add_customer_note( $order, self::describe_deletion_for_customer( $order, $item_name, $qty_remove, $mode, $gross ), $context );
 
@@ -345,15 +340,17 @@ class LP_Missing_Apply_Service {
 
         if ( $difference <= 0 ) {
             if ( $difference < 0 ) {
-                $result['summary_note'] = sprintf( __( 'Cheaper alternative: no surcharge order created and no negative surcharge applied. Difference retained on original order totals: %1$s.', 'lp-missing' ), wc_price( $difference, array( 'currency' => $order->get_currency() ) ) );
+                /* translators: %s: amount */
+                $result['summary_note'] = sprintf( __( 'Cheaper by %s; the order total is unchanged.', 'lp-missing' ), LP_Missing_Util::plain_price( abs( (float) $difference ), $order ) );
             } else {
-                $result['summary_note'] = __( 'No price delta between original and alternative; no surcharge order created.', 'lp-missing' );
+                $result['summary_note'] = __( 'Same price.', 'lp-missing' );
             }
             return $result;
         }
 
         if ( 'store_covers' === $result['mode'] ) {
-            $result['summary_note'] = sprintf( __( 'Store covers additional cost of %1$s; no surcharge order created.', 'lp-missing' ), wc_price( $difference, array( 'currency' => $order->get_currency() ) ) );
+            /* translators: %s: amount */
+            $result['summary_note'] = sprintf( __( 'The store covers the difference of %s.', 'lp-missing' ), LP_Missing_Util::plain_price( $difference, $order ) );
             return $result;
         }
 
@@ -402,7 +399,8 @@ class LP_Missing_Apply_Service {
         $surcharge_order->save();
 
         $result['surcharge_order_id'] = $surcharge_order->get_id();
-        $result['summary_note']       = sprintf( __( 'Created surcharge order #%1$s for delta %2$s.', 'lp-missing' ), $surcharge_order->get_order_number(), wc_price( $difference, array( 'currency' => $order->get_currency() ) ) );
+        /* translators: 1: order number, 2: amount */
+        $result['summary_note']       = sprintf( __( 'Surcharge order #%1$s for %2$s sent to the customer.', 'lp-missing' ), $surcharge_order->get_order_number(), LP_Missing_Util::plain_price( $difference, $order ) );
         LP_Missing_Logger::info(
             'Surcharge order created.',
             array(
