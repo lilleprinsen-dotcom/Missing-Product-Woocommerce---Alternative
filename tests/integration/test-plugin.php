@@ -1,6 +1,7 @@
 <?php
 // Core integration tests. Run with: wp eval-file tests/integration/test-plugin.php (see tests/README.md).
 require __DIR__ . '/bootstrap.php';
+require __DIR__ . '/portal-helpers.php';
 
 echo "HPOS: " . ( \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled() ? 'on' : 'off' ) . "\n";
 
@@ -35,48 +36,40 @@ admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '5', 'a
 t_eq( 0, count( $GLOBALS['lp_mails'] ), 'unchanged save sends nothing' );
 
 // ---------- Bug 1: guest portal flow ----------
+// The portal flow itself is covered in depth by test-portal.php; this keeps the order used by the apply tests below.
 echo "\n[Bug 1] Guest portal verification + choice\n";
+portal_jar_reset();
 $o = make_order( $A, 5 );
 $iid = first_item_id( $o );
 admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '2', 'alternatives' => array( $B->get_id(), $C->get_id() ) ) ) );
-$html = portal_request( $o );
-t_ok( false !== strpos( $html, 'lp_missing_verify_email' ), 'guest first sees verification form' );
-$verify_nonce = extract_field( $html, 'lp_missing_verify_nonce' );
-$html = portal_request( $o, array( 'lp_missing_verify_email' => 'KUNDE@example.com', 'lp_missing_verify_nonce' => $verify_nonce ) );
-$token = extract_field( $html, 'lp_missing_verified' );
-t_ok( ! empty( $token ), 'after verification the choice form carries a verification token' );
-$portal_nonce = extract_field( $html, 'lp_missing_nonce' );
-$html = portal_request( $o, array(
-	'lp_missing_nonce'    => $portal_nonce,
-	'lp_missing_verified' => $token,
-	'lp_missing_item_id'  => $iid,
-	'lp_missing_alt_id'   => $B->get_id(),
-	'lp_missing_alt_qty'  => 2,
-	'lp_missing_action'   => 'accept_alt',
-) );
-t_ok( false === strpos( $html, 'lp_missing_verify_email' ), 'choice submission is not bounced to verification' );
+$res = portal_follow( portal_http( call( 'get_magic_link_for_order', $o ) ) );
+t_ok( false !== strpos( $res['html'], 'lp_missing_verify_email' ), 'guest first sees verification form' );
+$res = portal_login( $o, 'KUNDE@example.com' );
+$token = extract_field( $res['html'], 'lp_missing_token' );
+t_ok( ! empty( $token ) && false === strpos( $res['html'], 'lp_missing_verify_email' ), 'after verification (case-insensitive) the choice form is shown' );
+$res = portal_save( $o, array( $iid => 'alt:' . $B->get_id() ), array( $iid => 2 ), $token );
+t_ok( false !== strpos( $res['redirect'], 'lp_msg=saved' ), 'choice submission redirects with a saved message (not bounced to verification)' );
 $d = item_data( $o->get_id(), $iid );
 t_eq( 'alt_pending', $d['status'], 'customer choice stored' );
 t_eq( $B->get_id(), $d['selected_alt_id'], 'selected alternative stored' );
 t_eq( '100.00', $d['pricing_snapshot']['delta_total_incl'], 'frozen delta incl VAT for 2 units' );
-// Re-submit (refresh) keeps the first decision.
+// Re-submitting the same form (a refresh) changes nothing; a different answer changes the decision until staff applies it.
 $frozen_at = $d['pricing_snapshot']['frozen_at'];
-$html = portal_request( $o, array(
-	'lp_missing_nonce'    => $portal_nonce,
-	'lp_missing_verified' => $token,
-	'lp_missing_item_id'  => $iid,
-	'lp_missing_alt_id'   => $C->get_id(),
-	'lp_missing_alt_qty'  => 2,
-	'lp_missing_action'   => 'accept_alt',
-) );
-t_eq( $B->get_id(), item_data( $o->get_id(), $iid )['selected_alt_id'], 're-submitted form does not overwrite the decision' );
-// Forged / expired token is rejected.
-$html = portal_request( $o, array( 'lp_missing_verified' => ( time() - 5 ) . ':abc', 'lp_missing_nonce' => $portal_nonce, 'lp_missing_action' => 'decline_all', 'lp_missing_item_id' => $iid ) );
-t_ok( false !== strpos( $html, 'lp_missing_verify_email' ), 'invalid token falls back to verification' );
-$bad = call( 'render_shortcode', array() );
-$_GET = array( 'oid' => $o->get_id(), 'key' => 'nope' );
-$bad = call( 'render_shortcode', array() );
-t_ok( false !== strpos( $bad, 'Lenken er ugyldig' ) && false === strpos( $bad, 'utløpt' ), 'invalid link message no longer claims expiry' );
+$res = portal_save( $o, array( $iid => 'alt:' . $B->get_id() ), array( $iid => 2 ), $token );
+t_ok( false !== strpos( $res['redirect'], 'lp_msg=nochange' ), 're-submitted form is a no-op' );
+t_eq( $frozen_at, item_data( $o->get_id(), $iid )['pricing_snapshot']['frozen_at'], 're-submitted form keeps the frozen price' );
+portal_save( $o, array( $iid => 'alt:' . $C->get_id() ), array( $iid => 2 ), $token );
+t_eq( $C->get_id(), item_data( $o->get_id(), $iid )['selected_alt_id'], 'customer can change the decision before staff applies it' );
+portal_save( $o, array( $iid => 'alt:' . $B->get_id() ), array( $iid => 2 ), $token );
+t_eq( $B->get_id(), item_data( $o->get_id(), $iid )['selected_alt_id'], 'changed back to the dearer alternative' );
+t_eq( '100.00', item_data( $o->get_id(), $iid )['pricing_snapshot']['delta_total_incl'], 'price frozen again at the new choice' );
+// Forged token is rejected.
+$res = portal_save( $o, array( $iid => 'decline' ), array(), 'x.abc' );
+t_ok( false !== strpos( $res['html'], 'Sikkerhetssjekken feilet' ) && 'alt_pending' === item_data( $o->get_id(), $iid )['status'], 'forged form token is rejected' );
+portal_jar_reset();
+$bad = portal_http( add_query_arg( array( 'oid' => $o->get_id(), 'key' => 'nope' ), portal_clean_url( $o ) ) );
+t_ok( false !== strpos( $bad['html'], 'Lenken er ugyldig' ) && false === strpos( $bad['html'], 'utløpt' ), 'invalid link message no longer claims expiry' );
+$_GET = array(); $_POST = array();
 
 // ---------- Bug 2: admin metabox renders no nested forms ----------
 echo "\n[Bug 2] Metabox markup\n";
@@ -140,7 +133,7 @@ echo "\n[Bug 4] Apply alternative - replace, whole line removed\n";
 $o = make_order( $A, 2 );
 $iid = first_item_id( $o );
 admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '2', 'alternatives' => array( $C->get_id() ) ) ) );
-call( 'handle_portal_action', $o, $o->get_billing_email() ); // no-op without POST
+LP_Missing_Portal::handle_request(); // no-op without a portal request
 $item = wc_get_order( $o->get_id() )->get_item( $iid );
 $data = call( 'get_item_data', $item );
 $data['status'] = 'alt_pending';
@@ -390,7 +383,7 @@ t_ok( false !== strpos( $html, 'lp-portal-item' ), 'staff can preview through sh
 t_ok( false === strpos( $html, '&lt;span' ) && false === strpos( $html, '&lt;bdi' ), 'price texts contain no escaped HTML markup' );
 t_ok( false !== strpos( $html, 'Mellomlegget faktureres' ), 'dearer alternative explains the surcharge' );
 t_ok( false !== strpos( $html, 'Ordren beholder opprinnelig pris' ), 'cheaper alternative no longer promises a lower price' );
-t_ok( false !== strpos( $html, 'formnovalidate' ), 'decline/delete buttons skip quantity validation' );
+t_ok( false === strpos( $html, '<form' ) && false === strpos( $html, 'lp_missing_token' ), 'staff preview through attributes is read-only (no form)' );
 $refund = wc_create_refund( array( 'amount' => 1, 'order_id' => $o->get_id() ) );
 wp_set_current_user( 0 );
 $_GET = array( 'oid' => $refund->get_id(), 'key' => 'x' );
@@ -625,8 +618,10 @@ echo "\n[Verify] Portal input and access\n";
 $o = make_order( $A, 1 );
 $iid = first_item_id( $o );
 admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1' ) ) );
-$html = portal_request( $o, array( 'lp_missing_verify_email' => array( 'x' ), 'lp_missing_verify_nonce' => 'x' ) );
-t_ok( is_string( $html ), 'array-valued email field is handled without a fatal error' );
+portal_jar_reset();
+$res  = portal_follow( portal_http( call( 'get_magic_link_for_order', $o ) ) );
+$res  = portal_http( portal_clean_url( $o ), array( 'lp_oid' => $o->get_id(), 'lp_missing_portal_action' => 'verify', 'lp_missing_token' => extract_field( $res['html'], 'lp_missing_token' ), 'lp_missing_verify_email' => array( 'x' ) ) );
+t_ok( is_string( $res['html'] ) && false !== strpos( $res['html'], 'lp_missing_verify_email' ), 'array-valued email field is handled without a fatal error' );
 $u = wp_insert_user( array( 'user_login' => 'bidrag' . wp_rand( 1, 99999 ), 'user_pass' => 'x', 'user_email' => 'kunde@example.com', 'role' => 'contributor' ) );
 if ( ! is_wp_error( $u ) ) {
 	wp_set_current_user( $u );

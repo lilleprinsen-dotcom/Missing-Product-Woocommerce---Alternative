@@ -1,6 +1,7 @@
 <?php
 /**
- * Customer portal (shortcode, magic link verification, customer choices).
+ * Customer portal: request handling (template_redirect: link exchange, email confirmation, decisions with
+ * post/redirect/get, private headers) and rendering (the [lp_missing_items] shortcode).
  *
  * @package LP_Missing
  */
@@ -10,11 +11,318 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class LP_Missing_Portal {
+    const ACTION_FIELD  = 'lp_missing_portal_action';
+    const TOKEN_FIELD   = 'lp_missing_token';
+    const ORDER_FIELD   = 'lp_oid';
+    const MESSAGE_PARAM = 'lp_msg';
+    const ASSET_HANDLE  = 'lp-missing-portal';
+
+    /** @var array|null Context of the handled request. */
+    protected static $context = null;
+    /** @var string|null Request the context belongs to. */
+    protected static $context_key = null;
+    /** @var bool */
+    protected static $private_headers_sent = false;
+
     public static function register() {
         add_shortcode( LP_Missing_Plugin::SHORTCODE, array( __CLASS__, 'render_shortcode' ) );
         add_filter( 'the_content', array( __CLASS__, 'maybe_inject_portal' ), 1 );
+        add_action( 'template_redirect', array( __CLASS__, 'on_template_redirect' ), 1 );
+        add_action( 'wp_enqueue_scripts', array( __CLASS__, 'on_enqueue_scripts' ) );
+        LP_Missing_Portal_Setup::register();
     }
 
+    // ---------------------------------------------------------------------------------------------------------------
+    // Request handling.
+    // ---------------------------------------------------------------------------------------------------------------
+
+    public static function get_requested_order_id() {
+        if ( isset( $_GET[ LP_Missing_Magic_Link::PARAM_ORDER ] ) && is_scalar( $_GET[ LP_Missing_Magic_Link::PARAM_ORDER ] ) ) {
+            return absint( $_GET[ LP_Missing_Magic_Link::PARAM_ORDER ] );
+        }
+        if ( isset( $_POST[ self::ORDER_FIELD ], $_POST[ self::ACTION_FIELD ] ) && is_scalar( $_POST[ self::ORDER_FIELD ] ) ) {
+            return absint( $_POST[ self::ORDER_FIELD ] );
+        }
+        return 0;
+    }
+
+    /**
+     * Whether this front-end request is for the portal: our parameters, our cookie or a portal page with an order.
+     */
+    public static function is_portal_request() {
+        $order_id = self::get_requested_order_id();
+        if ( ! $order_id ) {
+            return false;
+        }
+        if ( LP_Missing_Portal_Access::has_link_params() || isset( $_GET[ LP_Missing_Magic_Link::PARAM_PREVIEW ] ) || isset( $_GET[ self::MESSAGE_PARAM ] ) || isset( $_POST[ self::ACTION_FIELD ] ) ) {
+            return true;
+        }
+        if ( isset( $_COOKIE[ LP_Missing_Magic_Link::get_session_cookie_name( $order_id ) ] ) ) {
+            return true;
+        }
+        return self::is_portal_page();
+    }
+
+    /**
+     * The configured portal page, a page carrying the shortcode, or My Account opened with an order in the URL.
+     */
+    public static function is_portal_page() {
+        if ( is_admin() || ! did_action( 'wp' ) ) {
+            return false;
+        }
+        $page_id = absint( LP_Missing_Settings::get( 'portal_page_id' ) );
+        if ( $page_id && is_page( $page_id ) ) {
+            return true;
+        }
+        if ( ! empty( $_GET[ LP_Missing_Magic_Link::PARAM_ORDER ] ) && function_exists( 'wc_get_page_id' ) && wc_get_page_id( 'myaccount' ) > 0 && is_page( wc_get_page_id( 'myaccount' ) ) ) {
+            return true;
+        }
+        $post = get_queried_object();
+        return $post instanceof WP_Post && is_singular() && has_shortcode( $post->post_content, LP_Missing_Plugin::SHORTCODE );
+    }
+
+    public static function on_template_redirect() {
+        if ( self::is_portal_request() ) {
+            self::handle_request( true );
+        }
+    }
+
+    /**
+     * Resolve access and process the portal forms for the order in the request. With $allow_redirect (the
+     * template_redirect run) a used link is swapped for the session cookie and a clean URL, and a successful POST
+     * redirects (post/redirect/get). Returns the context, or null when the request names no order.
+     */
+    public static function handle_request( $allow_redirect = false ) {
+        self::$context     = null;
+        self::$context_key = self::request_key();
+
+        $order_id = self::get_requested_order_id();
+        if ( ! $order_id ) {
+            return null;
+        }
+        self::send_private_headers();
+
+        $ctx = LP_Missing_Portal_Access::resolve( $order_id );
+        if ( 'customer' === $ctx['mode'] && 'link' === $ctx['source'] ) {
+            LP_Missing_Portal_Access::start_session( $ctx );
+        }
+
+        if ( ! $ctx['error'] && 'customer' === $ctx['mode'] && isset( $_POST[ self::ACTION_FIELD ] ) && is_string( $_POST[ self::ACTION_FIELD ] ) ) {
+            $action = sanitize_key( wp_unslash( $_POST[ self::ACTION_FIELD ] ) );
+            if ( 'verify' === $action ) {
+                $ctx['result'] = LP_Missing_Portal_Access::handle_verification( $ctx );
+            } elseif ( 'save' === $action ) {
+                $ctx['result'] = $ctx['verified'] ? LP_Missing_Portal_Decisions::handle( $ctx ) : self::error_result( 'not_verified' );
+            }
+        }
+
+        self::$context = $ctx;
+
+        if ( $allow_redirect && ! $ctx['error'] ) {
+            if ( $ctx['result'] && 'success' === $ctx['result']['status'] ) {
+                self::redirect( add_query_arg( self::MESSAGE_PARAM, $ctx['result']['code'], self::get_clean_url( $order_id ) ), 303 );
+            } elseif ( $ctx['redirect'] && ! $ctx['result'] ) {
+                self::redirect( self::get_clean_url( $order_id, true ), 302 );
+            }
+        }
+        return $ctx;
+    }
+
+    /**
+     * The handled context of this request, handling it now when template_redirect did not (e.g. a shortcode rendered
+     * outside a normal page view). Never redirects.
+     */
+    public static function get_context() {
+        if ( self::$context_key === self::request_key() ) {
+            return self::$context;
+        }
+        return self::handle_request( false );
+    }
+
+    /**
+     * Forget the handled request (for tests and tools that run several requests in one process).
+     */
+    public static function reset_request_state() {
+        self::$context              = null;
+        self::$context_key          = null;
+        self::$private_headers_sent = false;
+    }
+
+    protected static function request_key() {
+        return md5( wp_json_encode( array( $_GET, $_POST, get_current_user_id() ) ) );
+    }
+
+    public static function error_result( $code, $extra = array() ) {
+        return array_merge(
+            array(
+                'status'  => 'error',
+                'code'    => $code,
+                'message' => self::get_error_message( $code ),
+            ),
+            $extra
+        );
+    }
+
+    public static function get_error_message( $code ) {
+        $messages = array(
+            'invalid'         => __( 'Lenken er ugyldig. Bruk lenken i den nyeste e-posten fra oss, eller kontakt oss.', 'lp-missing' ),
+            'expired'         => __( 'Lenken er utløpt. Bruk lenken i den nyeste e-posten fra oss, eller kontakt oss, så sender vi en ny.', 'lp-missing' ),
+            'revoked'         => __( 'Denne lenken er ikke lenger i bruk. Bruk lenken i den nyeste e-posten fra oss.', 'lp-missing' ),
+            'no_session'      => __( 'Åpne lenken i e-posten fra oss for å se varene som mangler. Siden bruker en informasjonskapsel (cookie) for å huske deg, så den må være tillatt i nettleseren.', 'lp-missing' ),
+            'no_access'       => __( 'Fant ikke ordren, eller e-postadressen stemmer ikke.', 'lp-missing' ),
+            'preview'         => __( 'This preview link is invalid or has expired. Open the preview again from the order screen.', 'lp-missing' ),
+            'csrf'            => __( 'Sikkerhetssjekken feilet. Last inn siden på nytt og prøv igjen.', 'lp-missing' ),
+            'busy'            => __( 'Vi oppdaterer ordren din akkurat nå. Prøv igjen om et øyeblikk.', 'lp-missing' ),
+            'rate'            => __( 'Du har gjort mange endringer på kort tid. Vent litt og prøv igjen.', 'lp-missing' ),
+            'lines'           => __( 'Noen av valgene må rettes før vi kan lagre. Se merknadene under.', 'lp-missing' ),
+            'verify_mismatch' => __( 'E-postadressen stemmer ikke med denne ordren.', 'lp-missing' ),
+            'verify_rate'     => __( 'For mange forsøk. Vent litt og prøv igjen.', 'lp-missing' ),
+            'not_verified'    => __( 'Bekreft e-postadressen din først.', 'lp-missing' ),
+        );
+        return isset( $messages[ $code ] ) ? $messages[ $code ] : $messages['invalid'];
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // URLs, redirects and headers.
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /**
+     * The URL of this request (host from home_url(), never from the Host header).
+     */
+    public static function get_current_url() {
+        if ( empty( $_SERVER['REQUEST_URI'] ) || ! is_string( $_SERVER['REQUEST_URI'] ) ) {
+            return '';
+        }
+        $home = wp_parse_url( home_url() );
+        if ( empty( $home['host'] ) ) {
+            return '';
+        }
+        $scheme = is_ssl() ? 'https' : ( isset( $home['scheme'] ) ? $home['scheme'] : 'http' );
+        return $scheme . '://' . $home['host'] . ( isset( $home['port'] ) ? ':' . $home['port'] : '' ) . wp_unslash( $_SERVER['REQUEST_URI'] );
+    }
+
+    /**
+     * This page without the link key, preview nonce or message. $canonical prefers the configured portal URL
+     * (links from older emails may point at another page).
+     */
+    public static function get_clean_url( $order_id = 0, $canonical = false ) {
+        $strip   = array( LP_Missing_Magic_Link::PARAM_TOKEN, LP_Missing_Magic_Link::PARAM_LEGACY, LP_Missing_Magic_Link::PARAM_PREVIEW, self::MESSAGE_PARAM );
+        $current = self::get_current_url();
+        if ( $canonical || '' === $current ) {
+            $base = remove_query_arg( $strip, LP_Missing_Magic_Link::get_portal_base_url() );
+            if ( wp_validate_redirect( $base, '' ) ) {
+                return $order_id ? add_query_arg( LP_Missing_Magic_Link::PARAM_ORDER, absint( $order_id ), $base ) : $base;
+            }
+        }
+        $url = remove_query_arg( $strip, $current );
+        return $order_id && isset( $_GET[ LP_Missing_Magic_Link::PARAM_ORDER ] ) ? add_query_arg( LP_Missing_Magic_Link::PARAM_ORDER, absint( $order_id ), $url ) : $url;
+    }
+
+    protected static function redirect( $url, $status ) {
+        wp_safe_redirect( $url, $status, 'LP Missing portal' );
+        exit;
+    }
+
+    /**
+     * Portal pages carry personal data and a link key: never cache, index or leak them in a Referer.
+     */
+    public static function send_private_headers() {
+        if ( self::$private_headers_sent ) {
+            return;
+        }
+        self::$private_headers_sent = true;
+        if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+            define( 'DONOTCACHEPAGE', true );
+        }
+        add_filter( 'wp_robots', array( __CLASS__, 'filter_robots' ), 99 );
+        $headers = array(
+            'Referrer-Policy' => 'no-referrer',
+            'X-Robots-Tag'    => 'noindex, nofollow',
+        );
+        /**
+         * Fires when the portal sends its private headers (in addition to nocache_headers()).
+         *
+         * @param array $headers Header name => value.
+         */
+        do_action( 'lp_missing_portal_private_headers', $headers );
+        if ( headers_sent() ) {
+            return;
+        }
+        nocache_headers();
+        foreach ( $headers as $name => $value ) {
+            header( $name . ': ' . $value );
+        }
+    }
+
+    public static function filter_robots( $robots ) {
+        $robots['noindex']   = true;
+        $robots['nofollow']  = true;
+        $robots['noarchive'] = true;
+        unset( $robots['follow'], $robots['max-image-preview'] );
+        return $robots;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Assets.
+    // ---------------------------------------------------------------------------------------------------------------
+
+    public static function on_enqueue_scripts() {
+        self::register_assets();
+        if ( self::is_portal_page() || self::is_portal_request() ) {
+            self::enqueue_assets();
+        }
+    }
+
+    protected static function asset_version( $relative ) {
+        $file = LP_MISSING_DIR . $relative;
+        return LP_Missing_Plugin::VERSION . ( is_readable( $file ) ? '.' . filemtime( $file ) : '' );
+    }
+
+    public static function register_assets() {
+        if ( wp_style_is( self::ASSET_HANDLE, 'registered' ) ) {
+            return;
+        }
+        wp_register_style( self::ASSET_HANDLE, plugins_url( 'assets/css/portal.css', LP_MISSING_FILE ), array(), self::asset_version( 'assets/css/portal.css' ) );
+        wp_register_script(
+            self::ASSET_HANDLE,
+            plugins_url( 'assets/js/portal.js', LP_MISSING_FILE ),
+            array(),
+            self::asset_version( 'assets/js/portal.js' ),
+            array(
+                'in_footer' => true,
+                'strategy'  => 'defer',
+            )
+        );
+    }
+
+    public static function enqueue_assets() {
+        self::register_assets();
+        wp_enqueue_style( self::ASSET_HANDLE );
+        wp_enqueue_script( self::ASSET_HANDLE );
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Rendering.
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /**
+     * The default portal URL is the My Account page, which does not carry the shortcode by itself:
+     * show the portal there when a portal URL (link, session or preview) is opened.
+     */
+    public static function maybe_inject_portal( $content ) {
+        if ( is_admin() || empty( $_GET[ LP_Missing_Magic_Link::PARAM_ORDER ] ) || ! is_main_query() || ! in_the_loop() ) {
+            return $content;
+        }
+        if ( has_shortcode( $content, LP_Missing_Plugin::SHORTCODE ) || ! function_exists( 'wc_get_page_id' ) || ! is_page( wc_get_page_id( 'myaccount' ) ) ) {
+            return $content;
+        }
+        return '[' . LP_Missing_Plugin::SHORTCODE . ']' . "\n\n" . $content;
+    }
+
+    /**
+     * Shortcode attributes (order_id + email) give access to staff (read-only preview) and to the order's own
+     * logged-in customer only.
+     */
     public static function get_order_for_shortcode( $atts ) {
         $order_id = isset( $atts['order_id'] ) ? absint( $atts['order_id'] ) : 0;
         $email    = isset( $atts['email'] ) ? sanitize_email( $atts['email'] ) : '';
@@ -28,370 +336,61 @@ class LP_Missing_Portal {
         if ( strtolower( $order->get_billing_email() ) !== strtolower( $email ) ) {
             return array( null, '' );
         }
-        // Attributes are written by whoever edits the page: only staff or the order's own customer may act through them.
-        $user = wp_get_current_user();
-        // Account emails can be changed without confirmation, so ownership is the order's customer ID only.
-        $is_owner = $user && $user->exists() && $order->get_customer_id() && $order->get_customer_id() === $user->ID;
-        if ( ! $is_owner && ! current_user_can( 'edit_shop_orders' ) ) {
+        if ( ! LP_Missing_Portal_Access::is_order_owner( $order ) && ! current_user_can( 'edit_shop_orders' ) ) {
             return array( null, '' );
         }
         return array( $order, $email );
     }
 
-    public static function get_order_from_magic_link() {
-        $order_id = isset( $_GET['oid'] ) ? absint( $_GET['oid'] ) : 0;
-        $key      = isset( $_GET['key'] ) ? sanitize_text_field( wp_unslash( $_GET['key'] ) ) : '';
-        if ( ! $order_id || ! $key ) {
-            return array( null, '', '' );
+    protected static function context_from_attributes( $atts ) {
+        if ( empty( $atts['order_id'] ) && empty( $atts['email'] ) ) {
+            return null;
         }
-        $order = wc_get_order( $order_id );
-        // wc_get_order() also returns refunds, which have no billing email.
-        if ( ! $order instanceof WC_Order ) {
-            return array( null, '', __( 'Lenken er ugyldig. Bruk lenken i den nyeste e-posten fra oss, eller kontakt oss.', 'lp-missing' ) );
+        list( $order ) = self::get_order_for_shortcode( $atts );
+        $ctx = LP_Missing_Portal_Access::empty_context( $order ? $order->get_id() : 0 );
+        if ( ! $order ) {
+            $ctx['error'] = 'no_access';
+            return $ctx;
         }
-        if ( ! LP_Missing_Magic_Link::validate_signature( $order_id, $order->get_billing_email(), $key ) ) {
-            return array( null, '', __( 'Lenken er ugyldig. Bruk lenken i den nyeste e-posten fra oss, eller kontakt oss.', 'lp-missing' ) );
-        }
-        return array( $order, $order->get_billing_email(), '' );
-    }
-
-    public static function verify_customer_email( $order, &$error ) {
-        $error         = '';
-        $billing_email = $order->get_billing_email();
-        if ( ! $billing_email ) {
-            return false;
-        }
-        if ( is_user_logged_in() ) {
-            $user = wp_get_current_user();
-            if ( $user && strtolower( $user->user_email ) === strtolower( $billing_email ) ) {
-                return true;
-            }
-        }
-        // Portal forms carry a signed token after a successful verification, so choices are not bounced back to this step.
-        if ( isset( $_POST['lp_missing_verified'] ) && LP_Missing_Magic_Link::validate_verification_token( $order->get_id(), $billing_email, sanitize_text_field( wp_unslash( $_POST['lp_missing_verified'] ) ) ) ) {
-            return true;
-        }
-        if ( isset( $_POST['lp_missing_verify_email'] ) ) {
-            $nonce = isset( $_POST['lp_missing_verify_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['lp_missing_verify_nonce'] ) ) : '';
-            if ( ! wp_verify_nonce( $nonce, 'lp_missing_verify_' . $order->get_id() ) ) {
-                $error = __( 'Sikkerhetssjekk feilet. Prøv igjen.', 'lp-missing' );
-                return false;
-            }
-            $submitted = is_string( $_POST['lp_missing_verify_email'] ) ? sanitize_email( wp_unslash( $_POST['lp_missing_verify_email'] ) ) : '';
-            if ( $submitted && strtolower( $submitted ) === strtolower( $billing_email ) ) {
-                return true;
-            }
-            $error = __( 'E-postadressen stemmer ikke med denne ordren.', 'lp-missing' );
-        }
-        return false;
-    }
-
-    public static function rate_limit_key( $order_id, $email ) {
-        return 'lp_missing_rate_' . $order_id . '_' . md5( strtolower( $email ) );
-    }
-
-    public static function handle_portal_action( $order, $email ) {
-        if ( empty( $_POST['lp_missing_action'] ) || empty( $_POST['lp_missing_nonce'] ) ) {
-            return array( 'message' => '', 'status' => '' );
-        }
-        if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lp_missing_nonce'] ) ), 'lp_missing_portal_' . $order->get_id() ) ) {
-            return array( 'message' => __( 'Sikkerhetssjekk feilet.', 'lp-missing' ), 'status' => 'error' );
-        }
-        if ( strtolower( $order->get_billing_email() ) !== strtolower( $email ) ) {
-            return array( 'message' => __( 'E-postadressen stemmer ikke med denne ordren.', 'lp-missing' ), 'status' => 'error' );
-        }
-        $key = self::rate_limit_key( $order->get_id(), $email );
-        $count = (int) get_transient( $key );
-        if ( $count >= 5 ) {
-            return array( 'message' => __( 'Du gjorde mange valg på kort tid. Vent litt og prøv igjen.', 'lp-missing' ), 'status' => 'error' );
-        }
-        set_transient( $key, $count + 1, MINUTE_IN_SECONDS );
-
-        $action    = sanitize_text_field( wp_unslash( $_POST['lp_missing_action'] ) );
-        $item_id   = isset( $_POST['lp_missing_item_id'] ) ? absint( $_POST['lp_missing_item_id'] ) : 0;
-        $items     = $order->get_items( 'line_item' );
-        $item      = isset( $items[ $item_id ] ) ? $items[ $item_id ] : null;
-        if ( ! $item ) {
-            return array( 'message' => __( 'Ugyldig vare valgt.', 'lp-missing' ), 'status' => 'error' );
-        }
-
-        $existing = LP_Missing_Line::get_item_data( $item );
-        if ( empty( $existing['missing'] ) || LP_Missing_Line::is_line_resolved( $existing ) ) {
-            return array( 'message' => __( 'Denne varen er ikke markert som manglende.', 'lp-missing' ), 'status' => 'error' );
-        }
-        if ( ! LP_Missing_Line::is_awaiting_customer( $existing ) ) {
-            // Re-submitted form (e.g. page refresh): keep the first decision and its frozen price.
-            return array( 'message' => __( 'Valget ditt for denne varen er allerede registrert.', 'lp-missing' ), 'status' => 'success' );
-        }
-
-        $new = $existing;
-        $new['last_updated'] = time();
-
-        if ( 'accept_alt' === $action ) {
-            $alt_id = isset( $_POST['lp_missing_alt_id'] ) ? absint( $_POST['lp_missing_alt_id'] ) : 0;
-            $qty_alt = isset( $_POST['lp_missing_alt_qty'] ) ? absint( $_POST['lp_missing_alt_qty'] ) : 0;
-            if ( $qty_alt < 1 || $qty_alt > $existing['qty_missing'] ) {
-                return array( 'message' => __( 'Ugyldig antall valgt.', 'lp-missing' ), 'status' => 'error' );
-            }
-            if ( ! in_array( $alt_id, $existing['alternatives'], true ) ) {
-                return array( 'message' => __( 'Dette alternativet kan ikke velges.', 'lp-missing' ), 'status' => 'error' );
-            }
-            $alt_product = wc_get_product( $alt_id );
-            if ( ! $alt_product ) {
-                return array( 'message' => __( 'Dette alternativet er ikke lenger tilgjengelig.', 'lp-missing' ), 'status' => 'error' );
-            }
-            $new['status'] = 'alt_pending';
-            $new['selected_alt_id'] = $alt_id;
-            $new['qty_alt'] = $qty_alt;
-            $new['pricing_snapshot'] = LP_Missing_Pricing::get_frozen_pricing_snapshot( $order, $item, $new, $alt_product, $qty_alt );
-        } elseif ( 'decline_all' === $action ) {
-            $new['status'] = 'declined';
-            $new['selected_alt_id'] = 0;
-            $new['qty_alt'] = 0;
-            $new['pricing_snapshot'] = array();
-        } elseif ( 'accept_delete' === $action ) {
-            if ( empty( $existing['propose_delete'] ) ) {
-                return array( 'message' => __( 'Sletting er ikke tilgjengelig for denne varen.', 'lp-missing' ), 'status' => 'error' );
-            }
-            $new['status'] = 'delete_pending';
-            $new['pricing_snapshot'] = array();
+        $ctx['order']    = $order;
+        $ctx['verified'] = true;
+        if ( LP_Missing_Portal_Access::is_order_owner( $order ) ) {
+            $ctx['mode']   = 'customer';
+            $ctx['source'] = 'attributes';
+            // The form posts back through handle_request(), which prefers this browser's session: bind the token alike.
+            $ctx['session'] = LP_Missing_Portal_Access::read_session( $order );
         } else {
-            return array( 'message' => __( 'Ukjent handling.', 'lp-missing' ), 'status' => 'error' );
+            $ctx['mode']   = 'preview';
+            $ctx['source'] = 'preview';
         }
-
-        if ( in_array( $new['status'], array( 'alt_pending', 'delete_pending' ), true ) ) {
-            $new['needs_attention'] = false;
-            $new['reminder_scheduled_for'] = 0;
-            $new['decision_made_at'] = time();
-            $new['resolved_at'] = 0;
-        }
-
-        if ( ! LP_Missing_Line::is_line_resolved( $new ) ) {
-            $new['resolved_at'] = 0;
-        }
-
-        if ( serialize( $existing ) !== serialize( $new ) ) {
-            $item->update_meta_data( LP_Missing_Plugin::META_KEY, $new );
-            $item->save();
-            do_action( 'lp_missing_item_updated', $order, $item_id, $new, $existing );
-        }
-
-        return array( 'message' => __( 'Takk! Valget ditt er lagret 💛', 'lp-missing' ), 'status' => 'success' );
+        return $ctx;
     }
 
-    /**
-     * The default portal URL is the My Account page, which does not carry the shortcode by itself:
-     * show the portal there when a magic link is opened.
-     */
-    public static function maybe_inject_portal( $content ) {
-        if ( is_admin() || empty( $_GET['oid'] ) || empty( $_GET['key'] ) || ! is_main_query() || ! in_the_loop() ) {
-            return $content;
+    public static function render_shortcode( $atts = array() ) {
+        $atts = shortcode_atts(
+            array(
+                'order_id' => 0,
+                'email'    => '',
+            ),
+            $atts,
+            LP_Missing_Plugin::SHORTCODE
+        );
+
+        $ctx = self::get_context();
+        if ( ! $ctx ) {
+            $ctx = self::context_from_attributes( $atts );
         }
-        if ( has_shortcode( $content, LP_Missing_Plugin::SHORTCODE ) || ! function_exists( 'wc_get_page_id' ) || ! is_page( wc_get_page_id( 'myaccount' ) ) ) {
-            return $content;
+        self::enqueue_assets();
+
+        if ( ! $ctx ) {
+            return LP_Missing_Portal_View::render_landing();
         }
-        return '[' . LP_Missing_Plugin::SHORTCODE . ']' . "\n\n" . $content;
-    }
-
-    public static function render_shortcode( $atts ) {
-        $atts = shortcode_atts( array(
-            'order_id' => 0,
-            'email'    => '',
-        ), $atts, LP_Missing_Plugin::SHORTCODE );
-
-        list( $order, $email, $link_error ) = self::get_order_from_magic_link();
-        $using_magic   = $order instanceof WC_Order;
-        $verify_error  = '';
-        $response      = array( 'message' => '', 'status' => '' );
-
-        if ( $link_error ) {
-            return '<div class="lp-missing-portal-error">' . esc_html( $link_error ) . '</div>';
+        if ( $ctx['error'] ) {
+            return LP_Missing_Portal_View::render_message( 'error', self::get_error_message( $ctx['error'] ) );
         }
-
-        if ( ! $using_magic ) {
-            list( $order, $email ) = self::get_order_for_shortcode( $atts );
-            if ( ! $order ) {
-                return '<div class="lp-missing-portal-error">' . esc_html__( 'Fant ikke ordren, eller e-postadressen stemmer ikke.', 'lp-missing' ) . '</div>';
-            }
-            $email_verified = true;
-        } else {
-            $email_verified = self::verify_customer_email( $order, $verify_error );
+        if ( 'customer' === $ctx['mode'] && ! $ctx['verified'] ) {
+            return LP_Missing_Portal_View::render_verify( $ctx );
         }
-
-        if ( $using_magic && ! $email_verified ) {
-            ob_start();
-            if ( $verify_error ) {
-                echo '<div class="lp-missing-portal-error">' . esc_html( $verify_error ) . '</div>';
-            }
-            echo '<div class="lp-missing-portal-verify">';
-            echo '<p>' . esc_html__( 'Bekreft e-postadressen du brukte i kassen for å fortsette.', 'lp-missing' ) . '</p>';
-            echo '<form method="post">';
-            wp_nonce_field( 'lp_missing_verify_' . $order->get_id(), 'lp_missing_verify_nonce' );
-            echo '<label>' . esc_html__( 'E-postadresse', 'lp-missing' ) . ' <input type="email" name="lp_missing_verify_email" required /></label> ';
-            echo '<button type="submit">' . esc_html__( 'Fortsett', 'lp-missing' ) . '</button>';
-            echo '</form>';
-            echo '</div>';
-            return ob_get_clean();
-        }
-
-        $email    = $order->get_billing_email();
-        $verification_token = $using_magic ? LP_Missing_Magic_Link::generate_verification_token( $order->get_id(), $email ) : '';
-        $response = self::handle_portal_action( $order, $email );
-        $items    = $order->get_items( 'line_item' );
-        $missing_items = array();
-        $alt_ids = array();
-        foreach ( $items as $item_id => $item ) {
-            $data = LP_Missing_Line::get_item_data( $item );
-            if ( ! empty( $data['missing'] ) && ! LP_Missing_Line::is_line_resolved( $data ) ) {
-                $missing_items[ $item_id ] = array( 'item' => $item, 'data' => $data );
-                if ( ! empty( $data['alternatives'] ) ) {
-                    $alt_ids = array_merge( $alt_ids, $data['alternatives'] );
-                }
-            }
-        }
-        if ( empty( $missing_items ) ) {
-            return '<div class="lp-missing-portal-empty">' . esc_html__( 'Alt er i orden 🎉 Ingen valg venter på deg nå.', 'lp-missing' ) . '</div>';
-        }
-
-        $alt_products = array();
-        if ( $alt_ids ) {
-            $products = wc_get_products( array( 'include' => array_values( array_unique( $alt_ids ) ), 'limit' => -1, 'type' => array_merge( array_keys( wc_get_product_types() ), array( 'variation' ) ) ) );
-            foreach ( $products as $product_obj ) {
-                $alt_products[ $product_obj->get_id() ] = $product_obj;
-            }
-        }
-
-        ob_start();
-        if ( ! empty( $response['message'] ) ) {
-            $class = 'success' === $response['status'] ? 'lp-message-success' : 'lp-message-error';
-            echo '<div class="' . esc_attr( $class ) . '">' . esc_html( $response['message'] ) . '</div>';
-        }
-        $customer_name = LP_Missing_Util::get_customer_first_name( $order );
-        echo '<style>
-            .lp-missing-portal{font-family:inherit;display:grid;gap:12px}
-            .lp-portal-card{border:1px solid #e5e7eb;border-radius:12px;padding:14px;background:#fff}
-            .lp-portal-muted{color:#6b7280;font-size:14px}
-            .lp-pill{display:inline-block;background:#f3f4f6;border-radius:999px;padding:3px 10px;font-size:12px;margin-top:6px}
-            .lp-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
-            .lp-btn{border:1px solid #d1d5db;background:#111827;color:#fff;border-radius:8px;padding:8px 12px;cursor:pointer}
-            .lp-btn--secondary{background:#fff;color:#111827}
-            .lp-message-success,.lp-message-error{border-radius:10px;padding:10px 12px;margin-bottom:10px}
-            .lp-message-success{background:#ecfdf5;border:1px solid #10b981}
-            .lp-message-error{background:#fef2f2;border:1px solid #ef4444}
-        </style>';
-        echo '<div class="lp-missing-portal">';
-        echo '<div class="lp-portal-card"><strong>' . esc_html( sprintf( __( 'Hei %s 👋', 'lp-missing' ), $customer_name ) ) . '</strong><div class="lp-portal-muted">' . esc_html__( 'Vi hjelper deg å velge hva som skal skje med varer som mangler. Prisforskjell fryses når du velger, slik at den ikke endres senere.', 'lp-missing' ) . '</div></div>';
-        foreach ( $missing_items as $item_id => $payload ) {
-            $item = $payload['item'];
-            $data = $payload['data'];
-            $product = $item->get_product();
-            $product_name = $product ? $product->get_name() : $item->get_name();
-            echo '<div class="lp-portal-card lp-portal-item">';
-            echo '<strong>' . esc_html( $product_name ) . '</strong>';
-            echo '<div class="lp-portal-muted">' . sprintf( esc_html__( 'Bestilt: %1$s stk · Mangler: %2$s stk', 'lp-missing' ), esc_html( $item->get_quantity() ), esc_html( $data['qty_missing'] ) ) . '</div>';
-            if ( ! empty( $data['notes'] ) ) {
-                echo '<div class="lp-pill">' . esc_html( $data['notes'] ) . '</div>';
-            }
-            if ( ! empty( $data['alternatives'] ) ) {
-                echo '<div style="margin-top:8px;"><em>' . esc_html__( 'Forslag til alternativ:', 'lp-missing' ) . '</em><ul style="margin:6px 0 0; padding-left:18px;">';
-                foreach ( $data['alternatives'] as $alt_id ) {
-                    $alt_product = isset( $alt_products[ $alt_id ] ) ? $alt_products[ $alt_id ] : wc_get_product( $alt_id );
-                    if ( ! $alt_product ) {
-                        continue;
-                    }
-                    $delta = LP_Missing_Pricing::get_alternative_price_delta( $order, $item, $alt_product, $data['qty_missing'] );
-                    $delta_text = __( 'Samme pris som original vare', 'lp-missing' );
-                    if ( 'up' === $delta['direction'] ) {
-                        $delta_text = LP_Missing_Pricing::store_covers_difference( $delta['total_delta_raw'] )
-                            ? sprintf( __( 'Koster %1$s mer per stk, men butikken dekker mellomlegget. Du betaler ikke noe ekstra.', 'lp-missing' ), $delta['unit_delta'] )
-                            : sprintf( __( 'Koster %1$s mer per stk (%2$s mer for %3$s stk). Mellomlegget faktureres i en egen ordre.', 'lp-missing' ), $delta['unit_delta'], $delta['total_delta'], $data['qty_missing'] );
-                    } elseif ( 'down' === $delta['direction'] ) {
-                        $delta_text = sprintf( __( 'Rimeligere enn originalen (%1$s mindre per stk). Ordren beholder opprinnelig pris.', 'lp-missing' ), $delta['unit_delta'] );
-                    }
-                    echo '<li>';
-                    echo '<a href="' . esc_url( $alt_product->get_permalink() ) . '" target="_blank" rel="noopener noreferrer">' . esc_html( $alt_product->get_name() ) . '</a>';
-                    $sku = $alt_product->get_sku();
-                    if ( $sku ) {
-                        echo ' <small>(' . esc_html( $sku ) . ')</small>';
-                    }
-                    echo '<div class="lp-portal-muted">' . esc_html( $delta_text ) . '</div>';
-                    echo '</li>';
-                }
-                echo '</ul></div>';
-            }
-
-            if ( LP_Missing_Line::has_customer_decision( $data ) ) {
-                echo '<div style="margin-top:8px;">' . esc_html__( 'Tusen takk! Valget ditt er registrert 💚 Teamet vårt oppdaterer ordren snart.', 'lp-missing' ) . '</div>';
-                if ( 'alt_pending' === $data['status'] && ! empty( $data['selected_alt_id'] ) ) {
-                    $alt_product = isset( $alt_products[ $data['selected_alt_id'] ] ) ? $alt_products[ $data['selected_alt_id'] ] : wc_get_product( $data['selected_alt_id'] );
-                    if ( $alt_product ) {
-                        $selected_qty = $data['qty_alt'] ? $data['qty_alt'] : $data['qty_missing'];
-                        $delta = LP_Missing_Pricing::get_alternative_price_delta( $order, $item, $alt_product, $selected_qty );
-                        echo '<div><em>' . esc_html__( 'Du valgte:', 'lp-missing' ) . '</em> ' . esc_html( $alt_product->get_name() ) . ' &times; ' . esc_html( $selected_qty ) . '</div>';
-                        if ( 'up' === $delta['direction'] ) {
-                            $locked_text = LP_Missing_Pricing::store_covers_difference( $delta['total_delta_raw'] )
-                                ? __( 'Pris låst ved valg: %s mer totalt, som butikken dekker.', 'lp-missing' )
-                                : __( 'Pris låst ved valg: %s mer totalt. Mellomlegget faktureres i en egen ordre.', 'lp-missing' );
-                            echo '<div class="lp-portal-muted">' . esc_html( sprintf( $locked_text, $delta['total_delta'] ) ) . '</div>';
-                        } elseif ( 'down' === $delta['direction'] ) {
-                            echo '<div class="lp-portal-muted">' . esc_html( sprintf( __( 'Rimeligere enn originalen (%s mindre totalt). Ordren beholder opprinnelig pris.', 'lp-missing' ), $delta['total_delta'] ) ) . '</div>';
-                        } else {
-                            echo '<div class="lp-portal-muted">' . esc_html__( 'Pris: ingen forskjell.', 'lp-missing' ) . '</div>';
-                        }
-                    }
-                } elseif ( 'delete_pending' === $data['status'] ) {
-                    echo '<div><em>' . esc_html__( 'Du godkjente å fjerne denne varen.', 'lp-missing' ) . '</em></div>';
-                }
-            } else {
-                echo '<form method="post" class="lp-actions">';
-                wp_nonce_field( 'lp_missing_portal_' . $order->get_id(), 'lp_missing_nonce' );
-                echo '<input type="hidden" name="lp_missing_item_id" value="' . absint( $item_id ) . '" />';
-                if ( $verification_token ) {
-                    echo '<input type="hidden" name="lp_missing_verified" value="' . esc_attr( $verification_token ) . '" />';
-                }
-
-                if ( ! empty( $data['alternatives'] ) ) {
-                    echo '<div>';
-                    echo '<label>' . esc_html__( 'Velg alternativ:', 'lp-missing' ) . ' ';
-                    echo '<select name="lp_missing_alt_id">';
-                    foreach ( $data['alternatives'] as $alt_id ) {
-                        $alt_product = isset( $alt_products[ $alt_id ] ) ? $alt_products[ $alt_id ] : wc_get_product( $alt_id );
-                        if ( ! $alt_product ) {
-                            continue;
-                        }
-                        $delta = LP_Missing_Pricing::get_alternative_price_delta( $order, $item, $alt_product, $data['qty_missing'] );
-                        $option_label = $alt_product->get_name();
-                        if ( 'up' === $delta['direction'] ) {
-                            $option_label .= ' (+' . $delta['unit_delta'] . ' /stk)';
-                        } elseif ( 'down' === $delta['direction'] ) {
-                            $option_label .= ' (-' . $delta['unit_delta'] . ' /stk)';
-                        } else {
-                            $option_label .= ' (' . __( 'samme pris', 'lp-missing' ) . ')';
-                        }
-                        echo '<option value="' . absint( $alt_id ) . '">' . esc_html( $option_label ) . '</option>';
-                    }
-                    echo '</select></label> ';
-                    echo '<label>' . esc_html__( 'Antall', 'lp-missing' ) . ' <input type="number" min="1" max="' . esc_attr( $data['qty_missing'] ) . '" name="lp_missing_alt_qty" value="' . esc_attr( $data['qty_missing'] ) . '" style="width:70px;" /></label> ';
-                    echo '<div class="lp-portal-muted">' . esc_html__( 'Du kan velge deler av manglende antall nå. Resten blir stående åpen til vi får nytt valg.', 'lp-missing' ) . '</div>';
-                    echo '<button class="lp-btn" type="submit" name="lp_missing_action" value="accept_alt">' . esc_html__( '✅ Velg dette alternativet', 'lp-missing' ) . '</button>';
-                    echo '</div>';
-                }
-
-                echo '<div>';
-                echo '<button class="lp-btn lp-btn--secondary" type="submit" name="lp_missing_action" value="decline_all" formnovalidate>' . esc_html__( '❌ Nei takk til alternativer', 'lp-missing' ) . '</button>';
-                echo '</div>';
-
-                if ( ! empty( $data['propose_delete'] ) ) {
-                    echo '<div>';
-                    echo '<button class="lp-btn lp-btn--secondary" type="submit" name="lp_missing_action" value="accept_delete" formnovalidate>' . esc_html__( '🗑️ Fjern denne varen fra ordren', 'lp-missing' ) . '</button>';
-                    echo '</div>';
-                }
-                echo '</form>';
-            }
-
-            echo '</div>';
-        }
-        echo '</div>';
-        return ob_get_clean();
+        return LP_Missing_Portal_View::render_portal( $ctx );
     }
 }
