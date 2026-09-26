@@ -126,9 +126,50 @@ abstract class LP_Missing_Email_Base extends WC_Email {
                 'lines'         => $this->lines,
                 'portal_url'    => $this->portal_url,
                 'deadline'      => $this->deadline,
-                'deadline_text' => $this->deadline ? LP_Missing_Deadline::describe( $this->deadline ) : '',
+                'deadline_text' => LP_Missing_Notifier::get_deadline_text( $this->object, $this->deadline ),
                 'customer_name' => $this->object instanceof WC_Order ? LP_Missing_Util::get_customer_first_name( $this->object ) : '',
             )
         );
+    }
+
+    /**
+     * Sample content for WooCommerce's email preview (the object is a dummy order that is not saved).
+     */
+    public function prepare_preview() {
+        $order       = $this->object instanceof WC_Order ? $this->object : null;
+        $this->lines = array();
+        $key         = 0;
+        foreach ( $order ? $order->get_items( 'line_item' ) : array() as $item ) {
+            $this->lines[ ++$key ] = array(
+                'item_id'        => $key,
+                'name'           => $item->get_name(),
+                'qty_ordered'    => max( 1, (int) $item->get_quantity() ),
+                'qty_missing'    => 1,
+                'note'           => __( 'Kommer tilbake på lager om ca. to uker.', 'lp-missing' ),
+                'alternatives'   => array( __( 'Tilsvarende vare fra et annet merke', 'lp-missing' ) ),
+                'propose_delete' => true,
+                'awaiting'       => true,
+            );
+        }
+        if ( ! $this->lines ) {
+            $this->lines[1] = array(
+                'item_id'        => 1,
+                'name'           => __( 'Eksempelvare', 'lp-missing' ),
+                'qty_ordered'    => 2,
+                'qty_missing'    => 1,
+                'note'           => '',
+                'alternatives'   => array(),
+                'propose_delete' => true,
+                'awaiting'       => true,
+            );
+        }
+        $this->portal_url = add_query_arg( array( 'oid' => 0, 'key' => 'preview' ), LP_Missing_Magic_Link::get_portal_base_url() );
+        $this->deadline   = LP_Missing_Deadline::enabled() ? LP_Missing_Deadline::calculate( time() ) : 0;
+        $names            = implode( ', ', wp_list_pluck( $this->lines, 'name' ) );
+        foreach ( array( '{count}' => (string) count( $this->lines ), '{item_names}' => $names, '{item_name}' => $names, '{deadline}' => $this->deadline ? LP_Missing_Deadline::format( $this->deadline ) : '', '{magic_link}' => $this->portal_url ) as $placeholder => $value ) {
+            if ( array_key_exists( $placeholder, $this->placeholders ) ) {
+                $this->placeholders[ $placeholder ] = $value;
+            }
+        }
     }
 }

@@ -10,6 +10,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class LP_Missing_Apply_Service {
+    /** @var array|null Customer notes collected during an automatic run: one note per order instead of one per line. */
+    protected static $note_buffer = null;
+
     /**
      * Apply the customer's chosen alternative. $mode: 'replace' (shrink the original line) or 'add' (keep it).
      * $context: 'manual' (staff) or 'automatic'. Callers hold the per-order apply lock.
@@ -61,7 +64,7 @@ class LP_Missing_Apply_Service {
             LP_Missing_Logger::warning( 'Decision could not be applied.', $log + array( 'reason' => $result['message'] ) );
         }
 
-        $fresh = wc_get_order( $order->get_id() );
+        $fresh = has_action( 'lp_missing_after_apply_decision' ) ? wc_get_order( $order->get_id() ) : null;
         /**
          * Fires after a decision was applied (or failed to apply).
          *
@@ -432,6 +435,10 @@ class LP_Missing_Apply_Service {
      * --------------------------------------------------------------------------------------------------------- */
 
     protected static function add_customer_note( $order, $text, $context ) {
+        if ( is_array( self::$note_buffer ) ) {
+            self::$note_buffer[] = $text;
+            return;
+        }
         if ( 'automatic' === $context ) {
             $text = __( 'Vi fikk ikke svar fra deg innen fristen.', 'lp-missing' ) . ' ' . $text;
         }
@@ -510,6 +517,7 @@ class LP_Missing_Apply_Service {
         if ( ! LP_Missing_Admin_Actions::acquire_apply_lock( $order_id ) ) {
             return array( 'status' => 'locked', 'results' => $results );
         }
+        self::$note_buffer = array();
         try {
             $order = wc_get_order( $order_id );
             if ( ! $order instanceof WC_Order ) {
@@ -603,6 +611,12 @@ class LP_Missing_Apply_Service {
                 );
             }
         } finally {
+            $notes             = self::$note_buffer;
+            self::$note_buffer = null;
+            $order             = $notes ? wc_get_order( $order_id ) : null;
+            if ( $order instanceof WC_Order ) {
+                self::add_customer_note( $order, implode( ' ', $notes ), 'automatic' );
+            }
             LP_Missing_Admin_Actions::release_apply_lock( $order_id );
         }
 

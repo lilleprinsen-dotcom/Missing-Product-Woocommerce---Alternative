@@ -226,7 +226,7 @@ t_ok( ! wp_next_scheduled( 'lp_missing_order_reminder', array( $o->get_id() ) ),
 t_eq( $cron_ts, LP_Missing_Scheduler::next( 'lp_missing_order_reminder', array( $o->get_id() ) ), '... to Action Scheduler with the same time' );
 
 echo "\n[Scheduler] Deactivation\n";
-LP_Missing_Scheduler::unschedule_all();
+do_action( 'deactivate_' . plugin_basename( LP_MISSING_FILE ) );
 t_eq( 0, count( as_get_scheduled_actions( array( 'group' => 'lp-missing', 'status' => ActionScheduler_Store::STATUS_PENDING, 'per_page' => 5 ), 'ids' ) ), 'deactivation cancels every pending action of the group' );
 t_ok( ! wp_next_scheduled( 'lp_missing_daily_cleanup' ), 'no WP-Cron leftovers' );
 delete_option( 'lp_missing_resync_offset' );
@@ -625,6 +625,34 @@ t_eq( 0, LP_Missing_Scheduler::next( 'lp_missing_order_deadline', array( $o->get
 $sm = mails_with_subject( 'Decision deadline passed' );
 t_ok( $sm && false !== strpos( $sm[0]['message'], 'Failed' ), 'staff email reports the failure' );
 t_eq( 400.0, (float) wc_get_order( $o->get_id() )->get_total_refunded(), 'nothing refunded by the failed attempt' );
+echo "\n[L11] Several lines at once, unpaid orders in the email\n";
+$o = paid_order( $A, 3 );
+$o->add_product( wc_get_product( $C->get_id() ), 2 );
+$o->calculate_totals( true );
+$o   = wc_get_order( $o->get_id() );
+$ids = array_keys( $o->get_items() );
+admin_save( $o, array( $ids[0] => array( 'missing' => '1', 'qty_missing' => '1' ), $ids[1] => array( 'missing' => '1', 'qty_missing' => '2' ) ) );
+set_line( $o->get_id(), $ids[0], array( 'deadline_at' => time() - 120 ) );
+set_line( $o->get_id(), $ids[1], array( 'deadline_at' => time() - 60 ) );
+LP_Missing_Lifecycle::sync_order_schedule( wc_get_order( $o->get_id() ) );
+$notes_before = count( customer_notes( $o->get_id() ) );
+$GLOBALS['lp_mails'] = array();
+run_pending( 'lp_missing_order_deadline', array( $o->get_id() ) );
+$notes = customer_notes( $o->get_id() );
+t_eq( $notes_before + 1, count( $notes ), 'one customer note for all lines handled in one run' );
+$combined = array_values( array_filter( $notes, function ( $n ) { return false !== strpos( $n, 'Bleier str 4 (1 stk)' ) && false !== strpos( $n, 'Bleier eco (2 stk)' ); } ) );
+t_eq( 1, count( $combined ), 'the note names both lines' );
+t_ok( $combined && 1 === substr_count( $combined[0], 'innen fristen' ), 'deadline explained once' );
+t_eq( 200.0, (float) wc_get_order( $o->get_id() )->get_total_refunded(), 'both lines refunded (100 + 2 x 50)' );
+$sm = mails_with_subject( 'Decision deadline passed' );
+t_ok( 1 === count( $sm ) && false !== strpos( $sm[0]['message'], 'Bleier str 4' ) && false !== strpos( $sm[0]['message'], 'Bleier eco' ), 'one staff email listing both lines' );
+$o   = unpaid_order( $A, 2 );
+$iid = first_item_id( $o );
+$GLOBALS['lp_mails'] = array();
+admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1' ) ) );
+$cm = mails_with_subject( 'Velg erstatning' );
+t_ok( $cm && false !== strpos( $cm[0]['message'], 'fjerner vi varen fra ordren' ) && false === strpos( $cm[0]['message'], 'refunderer' ), 'unpaid order: email promises removal, not a refund' );
+
 // Deadline switched off: jobs are dropped and nothing happens.
 $o   = paid_order( $A, 2 );
 $iid = first_item_id( $o );
@@ -677,6 +705,22 @@ $staff_email = WC()->mailer()->get_emails()['lp_missing_staff_decision'];
 t_ok( ! $staff_email->is_customer_email() && 'lp_missing_staff_decision' === $staff_email->id, 'staff email registered with WooCommerce' );
 t_ok( isset( WC()->mailer()->get_emails()['lp_missing_staff_deadline'] ), 'deadline staff email registered with WooCommerce' );
 t_ok( in_array( '{count}', array_keys( $email->placeholders ), true ) && in_array( '{deadline}', array_keys( $email->placeholders ), true ), 'placeholders documented in the email settings' );
+
+echo "\n[S6] WooCommerce email preview\n";
+$dummy = new WC_Order();
+$dummy->set_billing_first_name( 'John' );
+$preview_item = new WC_Order_Item_Product();
+$preview_item->set_name( 'Preview-vare' );
+$preview_item->set_quantity( 2 );
+$dummy->add_item( $preview_item );
+foreach ( array( 'lp_missing_customer_email' => 'Preview-vare', 'lp_missing_customer_reminder' => 'Preview-vare', 'lp_missing_staff_decision' => 'Sample alternative', 'lp_missing_staff_deadline' => 'Preview-vare' ) as $email_id => $needle ) {
+	$preview = clone WC()->mailer()->get_emails()[ $email_id ];
+	$preview->set_object( $dummy );
+	$preview = apply_filters( 'woocommerce_prepare_email_for_preview', $preview );
+	$html    = $preview->get_content_html();
+	$plain   = $preview->get_content_plain();
+	t_ok( false !== strpos( $html, $needle ) && false !== strpos( $plain, $needle ), "$email_id preview shows sample content" );
+}
 
 // ---------- Restore ----------
 update_option( 'lp_missing_settings', $lp_settings_before );

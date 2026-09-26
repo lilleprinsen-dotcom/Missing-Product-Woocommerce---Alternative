@@ -306,12 +306,11 @@ class LP_Missing_Lifecycle {
 
         // Reminder: when the customer was last contacted + spacing, inside the reminder window.
         $reminder_at = 0;
+        $existing    = 0;
         if ( $waiting ) {
-            $reminder_at = $reset_reminder ? 0 : LP_Missing_Scheduler::next( LP_Missing_Scheduler::REMINDER_HOOK, $args );
-            if ( ! $reminder_at ) {
-                $reminder_at = self::get_reminder_time();
-            }
-            $remindable = false;
+            $existing    = $reset_reminder ? 0 : LP_Missing_Scheduler::next( LP_Missing_Scheduler::REMINDER_HOOK, $args );
+            $reminder_at = $existing ? $existing : self::get_reminder_time();
+            $remindable  = false;
             foreach ( $waiting as $line ) {
                 $remindable = $remindable || self::is_remindable( $line[1], $reminder_at );
             }
@@ -319,10 +318,10 @@ class LP_Missing_Lifecycle {
                 $reminder_at = 0;
             }
         }
-        if ( $reminder_at ) {
-            LP_Missing_Scheduler::schedule_single( $reminder_at, LP_Missing_Scheduler::REMINDER_HOOK, $args );
-        } else {
+        if ( ! $reminder_at ) {
             LP_Missing_Scheduler::unschedule( LP_Missing_Scheduler::REMINDER_HOOK, $args );
+        } elseif ( $reminder_at !== $existing ) {
+            LP_Missing_Scheduler::schedule_single( $reminder_at, LP_Missing_Scheduler::REMINDER_HOOK, $args );
         }
 
         foreach ( $order->get_items( 'line_item' ) as $item_id => $item ) {

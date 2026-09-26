@@ -87,4 +87,22 @@ class LP_Missing_Staff_Decision_Email extends LP_Missing_Email_Base {
             )
         );
     }
+
+    public function prepare_preview() {
+        parent::prepare_preview();
+        $this->decisions = array();
+        foreach ( $this->lines as $key => $line ) {
+            $this->decisions[ $key ] = array(
+                'item_id'     => $key,
+                'name'        => $line['name'],
+                'qty_missing' => $line['qty_missing'],
+                /* translators: 1: product name, 2: quantity */
+                'choice'      => sprintf( __( 'Alternative: %1$s × %2$d', 'lp-missing' ), __( 'Sample alternative', 'lp-missing' ), $line['qty_missing'] ),
+                'previous'    => '',
+                'price'       => __( 'No price difference.', 'lp-missing' ),
+                'next_step'   => __( 'Apply the alternative in the Missing / Problem Items box on the order.', 'lp-missing' ),
+            );
+        }
+        $this->placeholders['{item_names}'] = implode( ', ', wp_list_pluck( $this->decisions, 'name' ) );
+    }
 }

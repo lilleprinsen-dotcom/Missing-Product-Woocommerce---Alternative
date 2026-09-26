@@ -51,6 +51,7 @@ class LP_Missing_Scheduler {
             && function_exists( 'as_schedule_recurring_action' )
             && function_exists( 'as_unschedule_all_actions' )
             && function_exists( 'as_get_scheduled_actions' )
+            && function_exists( 'as_has_scheduled_action' )
             && class_exists( 'ActionScheduler' );
     }
 

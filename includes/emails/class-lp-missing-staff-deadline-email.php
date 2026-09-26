@@ -76,4 +76,20 @@ class LP_Missing_Staff_Deadline_Email extends LP_Missing_Email_Base {
             )
         );
     }
+
+    public function prepare_preview() {
+        parent::prepare_preview();
+        $this->results = array();
+        foreach ( $this->lines as $key => $line ) {
+            $this->results[ $key ] = array(
+                'name'    => $line['name'],
+                'qty'     => $line['qty_missing'],
+                'action'  => 'reduce' === LP_Missing_Deadline::get_action() ? 'reduce' : 'refund',
+                'status'  => 'success',
+                'message' => '',
+                'amount'  => 0,
+            );
+        }
+        $this->placeholders['{item_names}'] = implode( ', ', wp_list_pluck( $this->results, 'name' ) );
+    }
 }

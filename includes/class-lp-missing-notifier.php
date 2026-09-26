@@ -24,6 +24,32 @@ class LP_Missing_Notifier {
         add_filter( 'woocommerce_email_classes', array( __CLASS__, 'register_email_class' ) );
         // WooCommerce's email settings offer to copy templates to the theme: point that at yourtheme/lp-missing/.
         add_filter( 'woocommerce_template_directory', array( __CLASS__, 'template_directory' ), 10, 2 );
+        add_filter( 'woocommerce_prepare_email_for_preview', array( __CLASS__, 'prepare_email_for_preview' ) );
+    }
+
+    /**
+     * WooCommerce > Settings > Emails previews emails with a dummy order: give ours sample lines.
+     */
+    public static function prepare_email_for_preview( $email ) {
+        if ( $email instanceof LP_Missing_Email_Base ) {
+            $email->prepare_preview();
+        }
+        return $email;
+    }
+
+    /**
+     * Customer sentence about the deadline, matching what will happen: on unpaid orders nothing can be refunded,
+     * so the missing quantity is removed instead.
+     */
+    public static function get_deadline_text( $order, $deadline ) {
+        if ( ! $deadline ) {
+            return '';
+        }
+        if ( 'refund' === LP_Missing_Deadline::get_action() && $order instanceof WC_Order && ! $order->is_paid() ) {
+            /* translators: %s: deadline, e.g. "fredag 3. oktober kl. 12:00" */
+            return sprintf( __( 'Hvis vi ikke hører fra deg innen %s, fjerner vi varen fra ordren.', 'lp-missing' ), LP_Missing_Deadline::format( $deadline ) );
+        }
+        return LP_Missing_Deadline::describe( $deadline );
     }
 
     public static function register_email_class( $emails ) {
