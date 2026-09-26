@@ -71,7 +71,7 @@
 
 .lp-portal-muted {
     color: var(--lp-muted);
-    font-size: 0.9375rem;
+    font-size: max(15px, 0.9375rem);
 }
 
 .lp-portal-deadline {
@@ -302,7 +302,7 @@
 .lp-option__diff,
 .lp-option__stock {
     color: var(--lp-muted);
-    font-size: 0.9375rem;
+    font-size: max(15px, 0.9375rem);
 }
 
 .lp-option__stock {

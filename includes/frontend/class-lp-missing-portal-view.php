@@ -55,6 +55,10 @@ class LP_Missing_Portal_View {
                 );
             }
         }
+        if ( $links && ! defined( 'DONOTCACHEPAGE' ) ) {
+            // A personal list: never store it in a page cache.
+            define( 'DONOTCACHEPAGE', true );
+        }
         $message = $links
             ? __( 'Disse bestillingene har varer som mangler. Velg en bestilling for å se hva du kan velge.', 'lp-missing' )
             : __( 'Her velger du hva som skal skje når en vare i bestillingen din mangler. Åpne lenken i e-posten fra oss for å komme til dine valg.', 'lp-missing' );
@@ -167,6 +171,9 @@ class LP_Missing_Portal_View {
      * Status message: the outcome of this request's POST, or of the one before the redirect (?lp_msg=).
      */
     public static function get_notice( $ctx, $awaiting ) {
+        if ( 'preview' === $ctx['mode'] ) {
+            return null;
+        }
         $result = is_array( $ctx['result'] ) ? $ctx['result'] : null;
         if ( $result && 'error' === $result['status'] ) {
             return array(
@@ -176,9 +183,6 @@ class LP_Missing_Portal_View {
             );
         }
         $code = $result ? $result['code'] : ( isset( $_GET[ LP_Missing_Portal::MESSAGE_PARAM ] ) && is_string( $_GET[ LP_Missing_Portal::MESSAGE_PARAM ] ) ? sanitize_key( wp_unslash( $_GET[ LP_Missing_Portal::MESSAGE_PARAM ] ) ) : '' );
-        if ( 'preview' === $ctx['mode'] ) {
-            return null;
-        }
         $remaining = $awaiting ? ' ' . sprintf(
             /* translators: %d: number of lines without an answer */
             _n( '%d vare venter fortsatt på svaret ditt.', '%d varer venter fortsatt på svaret ditt.', $awaiting, 'lp-missing' ),
