@@ -10,6 +10,38 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class LP_Missing_Orders {
+    /**
+     * Order flag: at least one line has a customer answer that staff must act on (apply the alternative or the
+     * removal, or handle a declined line). Maintained by refresh_order_flags() like the other flags.
+     */
+    const READY_FLAG = '_lp_missing_ready';
+
+    /**
+     * Line statuses where the customer has answered and the next step is the store's.
+     */
+    public static function get_staff_action_statuses() {
+        return array( 'alt_pending', 'delete_pending', 'declined' );
+    }
+
+    /**
+     * Whether a (still open) line has a customer answer that staff must act on.
+     */
+    public static function line_needs_staff_action( $data ) {
+        return ! empty( $data['missing'] ) && ! LP_Missing_Line::is_line_resolved( $data ) && in_array( $data['status'], self::get_staff_action_statuses(), true );
+    }
+
+    public static function order_is_ready_for_staff( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return false;
+        }
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            if ( self::line_needs_staff_action( LP_Missing_Line::get_item_data( $item ) ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static function order_has_missing_items( $order ) {
         if ( ! $order instanceof WC_Order ) {
             return false;
@@ -41,9 +73,10 @@ class LP_Missing_Orders {
             return;
         }
 
-        $has_data       = false;
-        $has_open       = false;
+        $has_data        = false;
+        $has_open        = false;
         $needs_attention = false;
+        $ready           = false;
 
         foreach ( $order->get_items( 'line_item' ) as $item ) {
             $data        = LP_Missing_Line::get_item_data( $item );
@@ -60,12 +93,17 @@ class LP_Missing_Orders {
             if ( ! empty( $data['missing'] ) && ! LP_Missing_Line::is_line_resolved( $data ) ) {
                 $has_open = true;
             }
+
+            if ( self::line_needs_staff_action( $data ) ) {
+                $ready = true;
+            }
         }
 
         $flags = array(
             LP_Missing_Plugin::OPTION_ATTENTION_FLAG    => $needs_attention,
             LP_Missing_Plugin::OPTION_HAS_MISSING_DATA  => $has_data,
             LP_Missing_Plugin::OPTION_HAS_OPEN_MISSING  => $has_open,
+            self::READY_FLAG                            => $ready,
         );
 
         $changed = false;
@@ -116,16 +154,30 @@ class LP_Missing_Orders {
     }
 
     /**
-     * Count orders with an open missing-item case. Uses meta_key/meta_value, which (unlike meta_query)
-     * wc_get_orders() honours for both legacy post storage and HPOS. An escalated line is always an open line.
+     * Count orders with an open missing-item case. An escalated line is always an open line.
      */
     public static function count_orders_with_open_missing() {
+        return self::count_orders_with_flag( LP_Missing_Plugin::OPTION_HAS_OPEN_MISSING );
+    }
+
+    /**
+     * Count orders where a customer has answered and staff must act (the "Customer answered" view).
+     */
+    public static function count_orders_ready_for_staff() {
+        return self::count_orders_with_flag( self::READY_FLAG );
+    }
+
+    /**
+     * Count orders carrying one of the order flags. Uses meta_key/meta_value, which (unlike meta_query)
+     * wc_get_orders() honours for both legacy post storage and HPOS.
+     */
+    public static function count_orders_with_flag( $meta_key ) {
         $result = wc_get_orders( array(
             'type'       => 'shop_order',
             'limit'      => 1,
             'paginate'   => true,
             'return'     => 'ids',
-            'meta_key'   => LP_Missing_Plugin::OPTION_HAS_OPEN_MISSING,
+            'meta_key'   => $meta_key,
             'meta_value' => 'yes',
         ) );
 
@@ -142,42 +194,43 @@ class LP_Missing_Orders {
 
     /**
      * Upgrade step: repair open cases saved by earlier versions (missing quantity 0, or a stock lock recorded for a
-     * product that does not manage stock, which was never taken).
+     * product that does not manage stock, which was never taken), and set the order flags added since (ready flag).
      */
     public static function upgrade_normalize_open_cases() {
-        $page = 1;
-        do {
-            $orders = wc_get_orders( array(
-                'type'       => 'shop_order',
-                'limit'      => 100,
-                'paged'      => $page,
-                'return'     => 'objects',
-                'meta_key'   => LP_Missing_Plugin::OPTION_HAS_MISSING_DATA,
-                'meta_value' => 'yes',
-            ) );
-            foreach ( $orders as $order ) {
-                foreach ( $order->get_items( 'line_item' ) as $item ) {
-                    if ( ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
-                        continue;
-                    }
-                    $data    = LP_Missing_Line::get_item_data( $item );
-                    $changed = false;
-                    if ( ! empty( $data['missing'] ) && ! LP_Missing_Line::is_line_resolved( $data ) && $data['qty_missing'] < 1 ) {
-                        $data['qty_missing'] = max( 1, LP_Missing_Line::get_item_available_qty( $item ) );
-                        $changed = true;
-                    }
-                    $product = $item->get_product();
-                    if ( $data['stock_locked_qty'] && ( ! $product || ! $product->managing_stock() ) ) {
-                        $data['stock_locked_qty'] = 0;
-                        $changed = true;
-                    }
-                    if ( $changed ) {
-                        $item->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
-                        $item->save();
-                    }
+        // Collect the IDs first: refreshing the flags can drop an order out of the flag query, which would shift pages.
+        $order_ids = wc_get_orders( array(
+            'type'       => 'shop_order',
+            'limit'      => -1,
+            'return'     => 'ids',
+            'meta_key'   => LP_Missing_Plugin::OPTION_HAS_MISSING_DATA,
+            'meta_value' => 'yes',
+        ) );
+        foreach ( $order_ids as $order_id ) {
+            $order = wc_get_order( $order_id );
+            if ( ! $order instanceof WC_Order ) {
+                continue;
+            }
+            foreach ( $order->get_items( 'line_item' ) as $item ) {
+                if ( ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
+                    continue;
+                }
+                $data    = LP_Missing_Line::get_item_data( $item );
+                $changed = false;
+                if ( ! empty( $data['missing'] ) && ! LP_Missing_Line::is_line_resolved( $data ) && $data['qty_missing'] < 1 ) {
+                    $data['qty_missing'] = max( 1, LP_Missing_Line::get_item_available_qty( $item ) );
+                    $changed = true;
+                }
+                $product = $item->get_product();
+                if ( $data['stock_locked_qty'] && ( ! $product || ! $product->managing_stock() ) ) {
+                    $data['stock_locked_qty'] = 0;
+                    $changed = true;
+                }
+                if ( $changed ) {
+                    $item->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
+                    $item->save();
                 }
             }
-            $page++;
-        } while ( count( $orders ) === 100 );
+            self::refresh_order_flags( $order );
+        }
     }
 }
