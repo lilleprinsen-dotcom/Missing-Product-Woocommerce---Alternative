@@ -139,6 +139,9 @@ class LP_Missing_Portal_Decisions {
         }
         self::window_hit( self::rate_key( $order->get_id() ), self::get_rate_limit()['window'] );
 
+        // One staff email and one schedule update for everything answered in this save.
+        LP_Missing_Lifecycle::begin_batch();
+        try {
         foreach ( $plan as $item_id => $step ) {
             list( $item, $existing, $new ) = $step;
             $item->update_meta_data( LP_Missing_Plugin::META_KEY, $new );
@@ -167,6 +170,9 @@ class LP_Missing_Portal_Decisions {
              * @param array    $old_data Line data before the decision.
              */
             do_action( 'lp_missing_customer_decision', $order, $item_id, $new, $existing );
+        }
+        } finally {
+            LP_Missing_Lifecycle::end_batch();
         }
 
         $ctx['order'] = wc_get_order( $order->get_id() );
@@ -291,5 +297,6 @@ class LP_Missing_Portal_Decisions {
         }
         $state['count'] = absint( $state['count'] ) + 1;
         set_transient( $key, $state, max( 1, absint( $state['start'] ) + $window - $now ) );
+        return $state['count'];
     }
 }

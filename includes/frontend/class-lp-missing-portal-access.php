@@ -13,14 +13,16 @@ if ( ! defined( 'ABSPATH' ) ) {
 class LP_Missing_Portal_Access {
     const SESSION_TTL = 172800; // 2 days; never longer than the link that opened the session.
 
-    const VERIFY_MAX_FAILURES = 10;
-    const VERIFY_WINDOW       = 900;
+    const VERIFY_MAX_FAILURES       = 10; // Per browser session.
+    const VERIFY_ORDER_MAX_FAILURES = 30; // Per order, across sessions.
+    const VERIFY_WINDOW             = 900;
 
     /**
      * An empty request context. Keys:
      * order_id, order (WC_Order|null), mode ('' | customer | preview), source (link | session | owner | attributes | preview),
      * verified (bool), session (array|null), link (array|null), error ('' | invalid | expired | revoked | no_session | preview | no_access),
-     * redirect (bool: drop the link from the URL), result (array|null: outcome of a POST).
+     * redirect (bool: drop the link from the URL), result (array|null: outcome of a POST),
+     * closed (bool: the order is cancelled, refunded, failed or trashed; nothing can be chosen).
      */
     public static function empty_context( $order_id = 0 ) {
         return array(
@@ -34,6 +36,7 @@ class LP_Missing_Portal_Access {
             'error'    => '',
             'redirect' => false,
             'result'   => null,
+            'closed'   => false,
         );
     }
 
@@ -64,9 +67,14 @@ class LP_Missing_Portal_Access {
         // wc_get_order() also returns refunds, which have no billing email.
         if ( ! $order instanceof WC_Order ) {
             if ( self::has_link_params() ) {
-                LP_Missing_Logger::warning( 'Customer link invalid.', array( 'order_id' => absint( $order_id ), 'reason' => 'unknown_order' ) );
+                LP_Missing_Logger::throttled_warning( 'link_invalid', 'Customer link invalid.', array( 'order_id' => absint( $order_id ), 'reason' => 'unknown_order' ) );
             }
-            $ctx['error'] = self::has_link_params() ? 'invalid' : 'no_session';
+            // Same answers as for an existing order, so the portal does not reveal which order numbers exist.
+            if ( '' !== self::get_query_string( LP_Missing_Magic_Link::PARAM_PREVIEW ) ) {
+                $ctx['error'] = 'preview';
+            } else {
+                $ctx['error'] = self::has_link_params() ? 'invalid' : 'no_session';
+            }
             return $ctx;
         }
         $ctx['order'] = $order;
@@ -80,7 +88,7 @@ class LP_Missing_Portal_Access {
                 LP_Missing_Logger::info( 'Staff opened the customer portal preview.', array( 'order_id' => $order->get_id(), 'user_id' => get_current_user_id() ) );
             } else {
                 $ctx['error'] = 'preview';
-                LP_Missing_Logger::warning( 'Customer portal preview refused (invalid nonce or missing capability).', array( 'order_id' => $order->get_id(), 'user_id' => get_current_user_id() ) );
+                LP_Missing_Logger::throttled_warning( 'preview_refused', 'Customer portal preview refused (invalid nonce or missing capability).', array( 'order_id' => $order->get_id(), 'user_id' => get_current_user_id() ) );
             }
             return $ctx;
         }
@@ -148,7 +156,7 @@ class LP_Missing_Portal_Access {
                 LP_Missing_Logger::info( 'Revoked customer link used.', $context );
                 break;
             default:
-                LP_Missing_Logger::warning( 'Customer link invalid.', array_merge( $context, array( 'reason' => 'signature' ) ) );
+                LP_Missing_Logger::throttled_warning( 'link_invalid', 'Customer link invalid.', array_merge( $context, array( 'reason' => 'signature' ) ) );
         }
     }
 
@@ -285,18 +293,34 @@ class LP_Missing_Portal_Access {
         if ( ! self::check_form_token( $ctx ) ) {
             return LP_Missing_Portal::error_result( 'csrf' );
         }
-        $limit_key = 'lp_missing_portal_vf_' . $order->get_id();
-        if ( ! LP_Missing_Portal_Decisions::window_allows( $limit_key, self::VERIFY_MAX_FAILURES ) ) {
-            LP_Missing_Logger::warning( 'Customer email confirmation blocked after too many attempts.', array( 'order_id' => $order->get_id() ) );
-            return LP_Missing_Portal::error_result( 'verify_rate' );
+        // Failures are counted per browser session (so someone else holding the link cannot lock the customer out
+        // with a few guesses) and, with a higher cap, per order. Attempts on one order are serialised so parallel
+        // requests cannot get past the counters.
+        $lock = 'lp_missing_verifying_' . $order->get_id();
+        if ( ! LP_Missing_Util::acquire_lock( $lock, 30 ) ) {
+            return LP_Missing_Portal::error_result( 'busy' );
         }
-        $submitted = isset( $_POST['lp_missing_verify_email'] ) && is_string( $_POST['lp_missing_verify_email'] ) ? sanitize_email( wp_unslash( $_POST['lp_missing_verify_email'] ) ) : '';
-        $billing   = strtolower( trim( (string) $order->get_billing_email() ) );
-        if ( '' === $submitted || '' === $billing || strtolower( trim( $submitted ) ) !== $billing ) {
-            LP_Missing_Portal_Decisions::window_hit( $limit_key, self::VERIFY_WINDOW );
-            // The submitted address is personal data: it is not logged.
-            LP_Missing_Logger::warning( 'Customer email confirmation failed.', array( 'order_id' => $order->get_id() ) );
-            return LP_Missing_Portal::error_result( 'verify_mismatch' );
+        try {
+            $sid         = ! empty( $ctx['session']['sid'] ) ? (string) $ctx['session']['sid'] : 'none';
+            $session_key = 'lp_missing_portal_vf_' . $order->get_id() . '_' . substr( md5( $sid ), 0, 12 );
+            $order_key   = 'lp_missing_portal_vfo_' . $order->get_id();
+            if ( ! LP_Missing_Portal_Decisions::window_allows( $session_key, self::VERIFY_MAX_FAILURES ) || ! LP_Missing_Portal_Decisions::window_allows( $order_key, self::VERIFY_ORDER_MAX_FAILURES ) ) {
+                return LP_Missing_Portal::error_result( 'verify_rate' );
+            }
+            $submitted = isset( $_POST['lp_missing_verify_email'] ) && is_string( $_POST['lp_missing_verify_email'] ) ? sanitize_email( wp_unslash( $_POST['lp_missing_verify_email'] ) ) : '';
+            $billing   = strtolower( trim( (string) $order->get_billing_email() ) );
+            if ( '' === $submitted || '' === $billing || strtolower( trim( $submitted ) ) !== $billing ) {
+                $session_count = LP_Missing_Portal_Decisions::window_hit( $session_key, self::VERIFY_WINDOW );
+                $order_count   = LP_Missing_Portal_Decisions::window_hit( $order_key, self::VERIFY_WINDOW );
+                // The submitted address is personal data: it is not logged. Blocking is logged once per window.
+                LP_Missing_Logger::warning( 'Customer email confirmation failed.', array( 'order_id' => $order->get_id() ) );
+                if ( self::VERIFY_MAX_FAILURES === $session_count || self::VERIFY_ORDER_MAX_FAILURES === $order_count ) {
+                    LP_Missing_Logger::warning( 'Customer email confirmation blocked after too many attempts.', array( 'order_id' => $order->get_id(), 'scope' => self::VERIFY_ORDER_MAX_FAILURES === $order_count ? 'order' : 'session' ) );
+                }
+                return LP_Missing_Portal::error_result( 'verify_mismatch' );
+            }
+        } finally {
+            LP_Missing_Util::release_lock( $lock );
         }
 
         $ctx['verified'] = true;

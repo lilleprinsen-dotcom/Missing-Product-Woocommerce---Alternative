@@ -13,9 +13,9 @@ Settings: **WooCommerce → Missing Items Settings**. Email texts: **WooCommerce
 ## How it works
 
 1. **Mark missing** – in the order's "Missing / Problem Items" box: tick the line, set the missing quantity (0 = whole line), write a note for the customer and pick alternatives (WooCommerce product search). Saving the order emails the customer a link to the portal.
-2. **Customer chooses** – the portal shows each missing line with the alternatives, prices and the price difference (frozen when the customer chooses). The customer can change the choice until staff apply it.
-3. **Staff apply** – from the box: replace the missing quantity, add the alternative as an extra line, remove the quantity from the order, or record a refund. A more expensive alternative creates a separate surcharge order (with VAT) unless the store covers the difference.
-4. **Reminders, deadline and cleanup** – reminders (one per order, within the configured hours), escalation to staff, an optional automatic action when the customer does not answer by the deadline, and automatic cleanup of resolved data. Scheduling uses WooCommerce's Action Scheduler (WooCommerce → Status → Scheduled Actions, group `lp-missing`).
+2. **Customer chooses** – the portal shows each missing line with the alternatives, prices and the price difference (frozen when the customer chooses). The customer confirms their billing email once per browser, and can change the choice until staff apply it. Cancelled, refunded, failed or trashed orders cannot be changed from the portal.
+3. **Staff apply** – from the box: replace the missing quantity, add the alternative as an extra line, remove the quantity from the order, or record a refund. A more expensive alternative creates a separate surcharge order (with VAT) unless the store covers the difference. Apply buttons are tied to the choice shown on the screen: if the customer changes their mind after the page was loaded, nothing is applied and staff are asked to check the new choice. Saving an order screen that is out of date (e.g. the deadline job or another user already resolved a line) leaves those lines alone and says so.
+4. **Reminders, deadline and cleanup** – reminders (one per order, within the configured hours), escalation to staff, an optional automatic action when the customer does not answer by the deadline, and automatic cleanup of resolved data. The deadline starts when the customer is emailed; a line whose missing quantity or stock changed after that is left to staff. Scheduling uses WooCommerce's Action Scheduler (WooCommerce → Status → Scheduled Actions, group `lp-missing`).
 
 ### Money and VAT
 
@@ -25,12 +25,12 @@ Settings: **WooCommerce → Missing Items Settings**. Email texts: **WooCommerce
 
 ### Stock
 
-- While a case is open, the missing quantity is locked (stock reduced by that amount) if "Lock stock for missing quantities" is on. The lock is released when the case is resolved, cleared, the line is deleted, or the order is cancelled, refunded, failed or deleted.
+- While a case is open, the missing quantity is locked (stock reduced by that amount) if "Lock stock for missing quantities" is on. The lock is released when the case is resolved, cleared, the line is deleted, or the order is cancelled, refunded, failed or deleted. A failed order keeps its case, and the lock is taken again if the payment is retried.
 - Units confirmed missing never come back into stock: when a line is reduced, only its stock record follows the new quantity, so WooCommerce's own stock sync does not restock them later. Alternatives reduce stock like any added line (for orders whose stock is already reduced; unpaid orders reduce stock at payment).
 
 ## Extending
 
-Templates can be overridden in `yourtheme/lp-missing/` (see `templates/`). See [Hooks](#hooks) for actions and filters. Customer links expire (setting), can be revoked per order from the order screen, and are exchanged for a short-lived session cookie on first use.
+Templates can be overridden in `yourtheme/lp-missing/` (see `templates/`). See [Hooks](#hooks) for actions and filters. Customer links expire (setting), can be revoked per order from the order screen, and are exchanged for a short-lived session cookie on first use. Portal pages are sent with no-cache, no-referrer and noindex headers (and `DONOTCACHEPAGE`); a page cache or CDN must not strip the `lp_missing_portal_*` cookie.
 
 ## Hooks
 

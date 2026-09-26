@@ -10,6 +10,25 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class LP_Missing_Util {
+    /**
+     * Take a short-lived named lock (a row in the options table; INSERT IGNORE is atomic on the unique option_name,
+     * unlike add_option()). A lock older than $stale_after seconds is treated as left by a request that died.
+     */
+    public static function acquire_lock( $name, $stale_after = 120 ) {
+        global $wpdb;
+        $existing = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
+        if ( null !== $existing && (int) $existing < time() - $stale_after ) {
+            $wpdb->delete( $wpdb->options, array( 'option_name' => $name, 'option_value' => $existing ) );
+        }
+        $inserted = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $name, (string) time() ) );
+        return 1 === (int) $inserted;
+    }
+
+    public static function release_lock( $name ) {
+        global $wpdb;
+        $wpdb->delete( $wpdb->options, array( 'option_name' => $name ) );
+    }
+
     public static function get_cached_product( $product_id, &$cache ) {
         $product_id = absint( $product_id );
         if ( $product_id && ! isset( $cache[ $product_id ] ) ) {

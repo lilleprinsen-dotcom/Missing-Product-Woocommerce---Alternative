@@ -118,16 +118,22 @@ function portal_request( $order, $post = array(), $token_from_html = null ) {
 function extract_field( $html, $name ) {
 	return preg_match( '/name="' . preg_quote( $name, '/' ) . '" value="([^"]*)"/', $html, $m ) ? html_entity_decode( $m[1] ) : null;
 }
-function apply_via_handler( $order_id, $item_id, $type, $mode ) {
+function apply_via_handler( $order_id, $item_id, $type, $mode, $decision = null ) {
 	reset_request();
 	wp_set_current_user( 1 );
+	if ( null === $decision ) {
+		// Like a freshly loaded order screen: the link carries the decision currently stored.
+		$item     = wc_get_order( $order_id )->get_item( $item_id, false );
+		$decision = $item ? LP_Missing_Line::get_decision_key( LP_Missing_Line::get_item_data( $item ) ) : '';
+	}
 	$_GET = $_REQUEST = array(
 		'action'     => 'lp_missing_apply_decision',
 		'order_id'   => $order_id,
 		'item_id'    => $item_id,
 		'apply_type' => $type,
 		'apply_mode' => $mode,
-		'_wpnonce'   => wp_create_nonce( 'lp_missing_apply_' . $order_id . '_' . $item_id ),
+		'decision'   => $decision,
+		'_wpnonce'   => wp_create_nonce( LP_Missing_Admin_Actions::apply_nonce_action( $order_id, $item_id, $decision ) ),
 	);
 	try {
 		call( 'handle_apply_decision' );

@@ -181,7 +181,10 @@ class LP_Missing_Lifecycle {
                 $item,
                 function( $data ) use ( $now ) {
                     $data['first_missing_at']      = $data['first_missing_at'] ? $data['first_missing_at'] : $now;
-                    $data['deadline_at']           = LP_Missing_Deadline::enabled() ? LP_Missing_Deadline::calculate( $now ) : 0;
+                    // The deadline is set when the customer is actually emailed (LP_Missing_Notifier), never before.
+                    $data['deadline_at']           = 0;
+                    $data['notified_qty']          = 0;
+                    $data['notified_available']    = 0;
                     $data['auto_action_failed_at'] = 0;
                     return $data;
                 }
@@ -465,7 +468,16 @@ class LP_Missing_Lifecycle {
             self::sync_order_schedule( $order );
             return;
         }
-        self::send_order_reminder( $order );
+        // Same lock as staff applies, customer saves and the deadline job, so no one overwrites the others' changes.
+        if ( ! LP_Missing_Admin_Actions::acquire_apply_lock( $order_id ) ) {
+            LP_Missing_Scheduler::schedule_single( time() + 5 * MINUTE_IN_SECONDS, LP_Missing_Scheduler::REMINDER_HOOK, array( $order_id ) );
+            return;
+        }
+        try {
+            self::send_order_reminder( wc_get_order( $order_id ) );
+        } finally {
+            LP_Missing_Admin_Actions::release_apply_lock( $order_id );
+        }
     }
 
     /**
@@ -505,10 +517,18 @@ class LP_Missing_Lifecycle {
 
         $sent = LP_Missing_Notifier::send_reminder_email( $order );
 
+        // Write on fresh data, and only for lines that are still waiting.
+        $order    = wc_get_order( $order->get_id() );
         $settings = LP_Missing_Settings::get_settings();
-        foreach ( $waiting as $item_id => $line ) {
-            $item = $line[0];
+        foreach ( array_keys( $waiting ) as $item_id ) {
+            $item = $order instanceof WC_Order ? $order->get_item( $item_id, false ) : null;
+            if ( ! $item ) {
+                continue;
+            }
             $data = LP_Missing_Line::get_item_data( $item );
+            if ( ! LP_Missing_Line::is_awaiting_customer( $data ) ) {
+                continue;
+            }
             $data['first_missing_at'] = $data['first_missing_at'] ? $data['first_missing_at'] : $now;
             if ( $sent ) {
                 $data['reminder_count']   = $data['reminder_count'] + 1;

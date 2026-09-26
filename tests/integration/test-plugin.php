@@ -599,7 +599,10 @@ admin_save( wc_get_order( $o->get_id() ), array( $iid => array( 'missing' => '1'
 t_eq( 48, wc_get_product( $L->get_id() )->get_stock_quantity(), 'lock taken on an unpaid order' );
 wc_get_order( $o->get_id() )->update_status( 'failed' );
 t_eq( 50, wc_get_product( $L->get_id() )->get_stock_quantity(), 'failed payment releases the lock' );
-t_eq( 'cleared', item_data( $o->get_id(), $iid )['status'], 'failed payment closes the case' );
+t_eq( 'pending', item_data( $o->get_id(), $iid )['status'], 'failed payment keeps the case (payment can be retried)' );
+wc_get_order( $o->get_id() )->update_status( 'pending' );
+t_eq( 48, wc_get_product( $L->get_id() )->get_stock_quantity(), 'retried payment takes the lock again' );
+t_ok( call( 'get_next_reminder_timestamp', wc_get_order( $o->get_id() ) ) > 0, 'reminders resume after the retry' );
 $o = make_order( $A, 1 );
 $o->add_product( wc_get_product( $C->get_id() ), 1 ); $o->calculate_totals( true );
 $ids = array_keys( wc_get_order( $o->get_id() )->get_items() );

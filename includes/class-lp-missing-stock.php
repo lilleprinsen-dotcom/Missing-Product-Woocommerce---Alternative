@@ -16,7 +16,9 @@ class LP_Missing_Stock {
         add_action( 'woocommerce_delete_order_item', array( __CLASS__, 'handle_order_item_after_delete' ) );
         add_action( 'woocommerce_order_status_cancelled', array( __CLASS__, 'handle_order_closed' ), 10, 2 );
         add_action( 'woocommerce_order_status_refunded', array( __CLASS__, 'handle_order_closed' ), 10, 2 );
-        add_action( 'woocommerce_order_status_failed', array( __CLASS__, 'handle_order_closed' ), 10, 2 );
+        // A failed payment can still be retried: give the stock back but keep the case; take it again when paid.
+        add_action( 'woocommerce_order_status_failed', array( __CLASS__, 'handle_order_failed' ), 10, 2 );
+        add_action( 'woocommerce_order_status_changed', array( __CLASS__, 'handle_order_recovered' ), 10, 4 );
         // Fires before the order's items are deleted, for both storages (a permanently deleted order).
         add_action( 'woocommerce_delete_order_items', array( __CLASS__, 'handle_order_closed' ) );
     }
@@ -167,5 +169,55 @@ class LP_Missing_Stock {
         if ( $changed ) {
             LP_Missing_Orders::refresh_order_flags( $order );
         }
+    }
+
+    public static function handle_order_failed( $order_id, $order = null ) {
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order_id );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            if ( ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
+                continue;
+            }
+            $data = LP_Missing_Line::get_item_data( $item );
+            if ( ! $data['stock_locked_qty'] ) {
+                continue;
+            }
+            $released            = $data;
+            $released['missing'] = false;
+            self::maybe_adjust_stock( $item, $data, $released, $order );
+            $data['stock_locked_qty'] = $released['stock_locked_qty'];
+            $item->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
+            $item->save();
+        }
+    }
+
+    public static function handle_order_recovered( $order_id, $from, $to, $order = null ) {
+        if ( 'failed' !== $from || ! in_array( $to, array( 'pending', 'processing', 'on-hold', 'completed' ), true ) ) {
+            return;
+        }
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order_id );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            if ( ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
+                continue;
+            }
+            $data = LP_Missing_Line::get_item_data( $item );
+            if ( LP_Missing_Line::is_line_resolved( $data ) ) {
+                continue;
+            }
+            $locked = $data;
+            self::maybe_adjust_stock( $item, $data, $locked, $order );
+            if ( $locked['stock_locked_qty'] !== $data['stock_locked_qty'] ) {
+                $data['stock_locked_qty'] = $locked['stock_locked_qty'];
+                $item->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
+                $item->save();
+            }
+        }
+        LP_Missing_Orders::refresh_order_flags( $order );
+        LP_Missing_Lifecycle::sync_order_schedule( $order );
     }
 }

@@ -97,7 +97,7 @@ abstract class LP_Missing_Email_Base extends WC_Email {
         if ( ! $this->lines && ! $awaiting_only ) {
             $this->lines = LP_Missing_Notifier::get_customer_lines( $order, false );
         }
-        $this->portal_url = LP_Missing_Magic_Link::get_magic_link_for_order( $order );
+        $this->portal_url = LP_Missing_Magic_Link::get_magic_link_for_order( $order, $this->is_enabled() );
         $this->deadline   = LP_Missing_Lifecycle::get_order_deadline( $order );
 
         $names         = wp_list_pluck( $this->lines, 'name' );

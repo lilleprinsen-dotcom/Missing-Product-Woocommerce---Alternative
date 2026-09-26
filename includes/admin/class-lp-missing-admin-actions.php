@@ -48,8 +48,9 @@ class LP_Missing_Admin_Actions {
         $order_id = isset( $_REQUEST['order_id'] ) ? absint( $_REQUEST['order_id'] ) : 0;
         $item_id  = isset( $_REQUEST['item_id'] ) ? absint( $_REQUEST['item_id'] ) : 0;
         $nonce    = isset( $_REQUEST['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['_wpnonce'] ) ) : '';
+        $decision = isset( $_REQUEST['decision'] ) && is_string( $_REQUEST['decision'] ) ? sanitize_key( wp_unslash( $_REQUEST['decision'] ) ) : '';
 
-        if ( ! $order_id || ! $item_id || ! wp_verify_nonce( $nonce, 'lp_missing_apply_' . $order_id . '_' . $item_id ) ) {
+        if ( ! $order_id || ! $item_id || ! wp_verify_nonce( $nonce, self::apply_nonce_action( $order_id, $item_id, $decision ) ) ) {
             wp_die( esc_html__( 'Security check failed.', 'lp-missing' ) );
         }
 
@@ -72,6 +73,9 @@ class LP_Missing_Admin_Actions {
                 $item  = $order instanceof WC_Order ? $order->get_item( $item_id, false ) : false;
                 if ( ! $item instanceof WC_Order_Item_Product ) {
                     $result = array( 'status' => 'error', 'message' => __( 'Item not found.', 'lp-missing' ) );
+                } elseif ( ! hash_equals( LP_Missing_Line::get_decision_key( LP_Missing_Line::get_item_data( $item ) ), $decision ) ) {
+                    // The page was rendered for another decision (the customer changed their choice, or it was applied).
+                    $result = array( 'status' => 'error', 'message' => __( 'The customer\'s choice or the line changed after this page was loaded. Nothing was applied; check the current choice and try again.', 'lp-missing' ) );
                 } elseif ( 'alternative' === $apply_type ) {
                     $result = LP_Missing_Apply_Service::apply_alternative_decision( $order, $item, $item_id, LP_Missing_Line::get_item_data( $item ), 'add' === $apply_mode ? 'add' : 'replace' );
                 } elseif ( 'delete' === $apply_type ) {
@@ -133,22 +137,19 @@ class LP_Missing_Admin_Actions {
         exit;
     }
 
+    /**
+     * Nonce action of an apply link: bound to the order, the line and the decision shown on the page.
+     */
+    public static function apply_nonce_action( $order_id, $item_id, $decision ) {
+        return 'lp_missing_apply_' . absint( $order_id ) . '_' . absint( $item_id ) . '_' . $decision;
+    }
+
     public static function acquire_apply_lock( $order_id ) {
-        global $wpdb;
-        $name     = 'lp_missing_applying_' . absint( $order_id );
-        $existing = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
-        if ( null !== $existing && (int) $existing < time() - 2 * MINUTE_IN_SECONDS ) {
-            // Stale lock left by a request that died.
-            $wpdb->delete( $wpdb->options, array( 'option_name' => $name, 'option_value' => $existing ) );
-        }
-        // INSERT IGNORE is atomic on the unique option_name key, unlike add_option().
-        $inserted = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $name, (string) time() ) );
-        return 1 === (int) $inserted;
+        return LP_Missing_Util::acquire_lock( 'lp_missing_applying_' . absint( $order_id ), 2 * MINUTE_IN_SECONDS );
     }
 
     public static function release_apply_lock( $order_id ) {
-        global $wpdb;
-        $wpdb->delete( $wpdb->options, array( 'option_name' => 'lp_missing_applying_' . absint( $order_id ) ) );
+        LP_Missing_Util::release_lock( 'lp_missing_applying_' . absint( $order_id ) );
     }
 
     public static function admin_notices() {

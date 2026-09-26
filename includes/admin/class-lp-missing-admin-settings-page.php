@@ -41,8 +41,9 @@ class LP_Missing_Admin_Settings_Page {
             $name = 'lp_' . $key;
             if ( 'checkbox' === $field['type'] ) {
                 $settings[ $key ] = ! empty( $_POST[ $name ] ) ? 'yes' : 'no';
-            } elseif ( isset( $_POST[ $name ] ) ) {
-                $settings[ $key ] = wp_unslash( $_POST[ $name ] ); // Sanitised per field type by LP_Missing_Settings.
+            } elseif ( isset( $_POST[ $name ] ) && is_scalar( $_POST[ $name ] ) ) {
+                // Sanitised per field type by LP_Missing_Settings. Anything else (e.g. an array) keeps the current value.
+                $settings[ $key ] = wp_unslash( $_POST[ $name ] );
             }
         }
 

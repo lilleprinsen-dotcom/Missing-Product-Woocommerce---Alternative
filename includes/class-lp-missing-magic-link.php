@@ -88,11 +88,34 @@ class LP_Missing_Magic_Link {
      */
     public static function get_keyring() {
         $ring = get_option( self::OPTION_KEYS, array() );
-        if ( ! is_array( $ring ) || empty( $ring['current'] ) || empty( $ring['keys'][ $ring['current'] ]['secret'] ) ) {
-            $ring = self::add_key( is_array( $ring ) ? $ring : array() );
-            update_option( self::OPTION_KEYS, $ring, false );
+        if ( self::is_usable_ring( $ring ) ) {
+            return $ring;
         }
+        if ( false === get_option( self::OPTION_KEYS, false ) ) {
+            // First use. Two requests may create the ring at the same time; only one INSERT IGNORE succeeds (unlike
+            // add_option(), which overwrites), and the other request re-reads the winner's ring. So no link is ever
+            // signed with a key that is then lost.
+            global $wpdb;
+            $new      = self::add_key( array() );
+            $inserted = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", self::OPTION_KEYS, maybe_serialize( $new ) ) );
+            wp_cache_delete( self::OPTION_KEYS, 'options' );
+            wp_cache_delete( 'notoptions', 'options' );
+            if ( 1 === (int) $inserted ) {
+                return $new;
+            }
+            $ring = get_option( self::OPTION_KEYS, array() );
+            if ( self::is_usable_ring( $ring ) ) {
+                return $ring;
+            }
+        }
+        // Damaged ring: repair it, keeping any keys still in it.
+        $ring = self::add_key( is_array( $ring ) ? $ring : array() );
+        update_option( self::OPTION_KEYS, $ring, false );
         return $ring;
+    }
+
+    protected static function is_usable_ring( $ring ) {
+        return is_array( $ring ) && ! empty( $ring['current'] ) && ! empty( $ring['keys'][ $ring['current'] ]['secret'] );
     }
 
     public static function get_current_key_id() {
@@ -213,22 +236,28 @@ class LP_Missing_Magic_Link {
 
     /**
      * Customer link for the portal (v2). Every call issues a fresh link valid for the configured number of days.
+     *
+     * @param WC_Order $order
+     * @param bool     $log   Log the link as issued (links put into emails). Links only shown to staff on the order
+     *                        screen are not logged, so the log tells which links customers were sent.
      */
-    public static function get_magic_link_for_order( $order ) {
+    public static function get_magic_link_for_order( $order, $log = false ) {
         if ( ! $order instanceof WC_Order || ! $order->get_billing_email() ) {
             return '';
         }
         $token = self::create_link_token( $order );
-        $parts = explode( '.', $token );
-        LP_Missing_Logger::info(
-            'Customer link issued.',
-            array(
-                'order_id'   => $order->get_id(),
-                'key_id'     => $parts[0],
-                'generation' => (int) $parts[1],
-                'expires'    => gmdate( 'c', (int) $parts[2] ),
-            )
-        );
+        if ( $log ) {
+            $parts = explode( '.', $token );
+            LP_Missing_Logger::info(
+                'Customer link issued.',
+                array(
+                    'order_id'   => $order->get_id(),
+                    'key_id'     => $parts[0],
+                    'generation' => (int) $parts[1],
+                    'expires'    => gmdate( 'c', (int) $parts[2] ),
+                )
+            );
+        }
         return add_query_arg(
             array(
                 self::PARAM_ORDER => $order->get_id(),

@@ -84,6 +84,10 @@ class LP_Missing_Portal {
     public static function on_template_redirect() {
         if ( self::is_portal_request() ) {
             self::handle_request( true );
+        } elseif ( self::is_portal_page() ) {
+            // Without an order in the URL the page can still show order data (a logged-in customer's orders, or
+            // shortcode attributes): keep it out of caches and search engines too.
+            self::send_private_headers();
         }
     }
 
@@ -107,9 +111,15 @@ class LP_Missing_Portal {
             LP_Missing_Portal_Access::start_session( $ctx );
         }
 
+        if ( ! $ctx['error'] && 'customer' === $ctx['mode'] && $ctx['order'] instanceof WC_Order && LP_Missing_Lifecycle::order_is_closed( $ctx['order'] ) ) {
+            $ctx['closed'] = true;
+        }
+
         if ( ! $ctx['error'] && 'customer' === $ctx['mode'] && isset( $_POST[ self::ACTION_FIELD ] ) && is_string( $_POST[ self::ACTION_FIELD ] ) ) {
             $action = sanitize_key( wp_unslash( $_POST[ self::ACTION_FIELD ] ) );
-            if ( 'verify' === $action ) {
+            if ( $ctx['closed'] ) {
+                $ctx['result'] = self::error_result( 'closed' );
+            } elseif ( 'verify' === $action ) {
                 $ctx['result'] = LP_Missing_Portal_Access::handle_verification( $ctx );
             } elseif ( 'save' === $action ) {
                 $ctx['result'] = $ctx['verified'] ? LP_Missing_Portal_Decisions::handle( $ctx ) : self::error_result( 'not_verified' );
@@ -178,6 +188,7 @@ class LP_Missing_Portal {
             'verify_mismatch' => __( 'E-postadressen stemmer ikke med denne ordren.', 'lp-missing' ),
             'verify_rate'     => __( 'For mange forsøk. Vent litt og prøv igjen.', 'lp-missing' ),
             'not_verified'    => __( 'Bekreft e-postadressen din først.', 'lp-missing' ),
+            'closed'          => __( 'Denne ordren er avsluttet, så det er ingenting å velge her. Kontakt oss hvis du har spørsmål.', 'lp-missing' ),
         );
         return isset( $messages[ $code ] ) ? $messages[ $code ] : $messages['invalid'];
     }
@@ -379,6 +390,10 @@ class LP_Missing_Portal {
         $ctx = self::get_context();
         if ( ! $ctx ) {
             $ctx = self::context_from_attributes( $atts );
+            if ( $ctx ) {
+                // Also when the shortcode is rendered outside a page view template_redirect recognised.
+                self::send_private_headers();
+            }
         }
         self::enqueue_assets();
 
@@ -387,6 +402,9 @@ class LP_Missing_Portal {
         }
         if ( $ctx['error'] ) {
             return LP_Missing_Portal_View::render_message( 'error', self::get_error_message( $ctx['error'] ) );
+        }
+        if ( 'customer' === $ctx['mode'] && ( ! empty( $ctx['closed'] ) || LP_Missing_Lifecycle::order_is_closed( $ctx['order'] ) ) ) {
+            return LP_Missing_Portal_View::render_message( 'info', self::get_error_message( 'closed' ) );
         }
         if ( 'customer' === $ctx['mode'] && ! $ctx['verified'] ) {
             return LP_Missing_Portal_View::render_verify( $ctx );

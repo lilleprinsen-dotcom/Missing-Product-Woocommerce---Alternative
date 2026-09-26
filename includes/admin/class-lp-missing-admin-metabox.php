@@ -13,8 +13,10 @@ class LP_Missing_Admin_Metabox {
     public static function register() {
         add_action( 'add_meta_boxes', array( __CLASS__, 'add_metabox' ) );
         // Fired by WooCommerce for both legacy (post) and HPOS order edit screens, after its own item/data saves.
+        add_action( 'woocommerce_process_shop_order_meta', array( __CLASS__, 'protect_stale_lines' ), 5, 1 );
         add_action( 'woocommerce_process_shop_order_meta', array( __CLASS__, 'save_metabox' ), 60, 2 );
         add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_admin_scripts' ) );
+        add_action( 'admin_notices', array( __CLASS__, 'render_stale_notice' ) );
     }
 
     public static function add_metabox() {
@@ -70,6 +72,8 @@ class LP_Missing_Admin_Metabox {
             /* translators: %s: quantity */
             echo '<strong>' . esc_html( $product_name ) . '</strong> (' . esc_html( sprintf( __( 'Qty: %s', 'lp-missing' ), $item->get_quantity() ) ) . ')';
             echo '<div class="lp-missing-field">';
+            // What this screen was built from: a save from a stale screen must not overwrite a line changed meanwhile.
+            echo '<input type="hidden" name="' . esc_attr( $field . '[rev]' ) . '" value="' . esc_attr( LP_Missing_Line::get_revision( $item ) ) . '" />';
             echo '<label class="lp-missing-inline"><input type="checkbox" name="' . esc_attr( $field . '[missing]' ) . '" value="1" ' . checked( true, $data['missing'], false ) . ' /> ' . esc_html__( 'Mark as missing', 'lp-missing' ) . '</label> ';
             echo '<label class="lp-missing-inline"><input type="checkbox" name="' . esc_attr( $field . '[propose_delete]' ) . '" value="1" ' . checked( true, $data['propose_delete'], false ) . ' /> ' . esc_html__( 'Propose deleting this item instead', 'lp-missing' ) . '</label>';
             echo '</div>';
@@ -304,17 +308,20 @@ class LP_Missing_Admin_Metabox {
     }
 
     public static function get_apply_url( $order, $item_id, $type, $mode ) {
-        $url = add_query_arg(
+        $item     = $order->get_item( $item_id, false );
+        $decision = $item ? LP_Missing_Line::get_decision_key( LP_Missing_Line::get_item_data( $item ) ) : '';
+        $url      = add_query_arg(
             array(
                 'action'     => 'lp_missing_apply_decision',
                 'order_id'   => $order->get_id(),
                 'item_id'    => absint( $item_id ),
                 'apply_type' => $type,
                 'apply_mode' => $mode,
+                'decision'   => $decision,
             ),
             admin_url( 'admin-post.php' )
         );
-        return wp_nonce_url( $url, 'lp_missing_apply_' . $order->get_id() . '_' . absint( $item_id ) );
+        return wp_nonce_url( $url, LP_Missing_Admin_Actions::apply_nonce_action( $order->get_id(), $item_id, $decision ) );
     }
 
     public static function render_apply_link( $order, $item_id, $type, $mode, $label, $primary = false ) {
@@ -375,10 +382,94 @@ class LP_Missing_Admin_Metabox {
             return;
         }
 
+        // Same lock as applies, customer saves and the background jobs: never write lines while one of them runs.
+        if ( ! LP_Missing_Admin_Actions::acquire_apply_lock( $order_id ) ) {
+            self::add_stale_notice( array( __( 'all lines (the order was being updated at the same moment)', 'lp-missing' ) ) );
+            return;
+        }
+        // One customer email listing every line marked in this save (also when called outside the order screen).
+        LP_Missing_Lifecycle::begin_batch();
+        try {
+            self::save_lines( $order );
+        } finally {
+            LP_Missing_Admin_Actions::release_apply_lock( $order_id );
+            LP_Missing_Lifecycle::end_batch();
+        }
+    }
+
+    /**
+     * Before WooCommerce saves the posted line items (priority 10): drop the posted item fields of lines the plugin
+     * changed after this screen was rendered (e.g. the deadline job reduced the line), so a stale screen cannot put
+     * back the old quantity and totals.
+     */
+    public static function protect_stale_lines( $order_id ) {
+        if ( empty( $_POST['lp_missing_items'] ) || ! is_array( $_POST['lp_missing_items'] ) || ! isset( $_POST['lp_missing_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lp_missing_nonce'] ) ), 'lp_missing_metabox' ) ) {
+            return;
+        }
+        $order = wc_get_order( $order_id );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        // Decided before WooCommerce applies this form's own item edits, which change quantities legitimately.
+        $stale              = self::get_stale_line_ids( $order );
+        self::$stale_lines = $stale;
+        if ( ! $stale || empty( $_POST['order_item_id'] ) || ! is_array( $_POST['order_item_id'] ) ) {
+            return;
+        }
+        $_POST['order_item_id'] = array_values( array_diff( array_map( 'absint', $_POST['order_item_id'] ), $stale ) );
+    }
+
+    /**
+     * Lines whose case or quantities changed after the order screen was rendered.
+     */
+    protected static function get_stale_line_ids( $order ) {
+        $stale = array();
+        foreach ( $order->get_items( 'line_item' ) as $item_id => $item ) {
+            if ( ! isset( $_POST['lp_missing_items'][ $item_id ]['rev'] ) ) {
+                continue;
+            }
+            $posted = sanitize_text_field( wp_unslash( $_POST['lp_missing_items'][ $item_id ]['rev'] ) );
+            if ( ! hash_equals( LP_Missing_Line::get_revision( $item ), $posted ) ) {
+                $stale[] = $item_id;
+            }
+        }
+        return $stale;
+    }
+
+    protected static function add_stale_notice( $names ) {
+        $key     = 'lp_missing_stale_' . get_current_user_id();
+        $current = get_transient( $key );
+        $names   = array_unique( array_merge( is_array( $current ) ? $current : array(), $names ) );
+        set_transient( $key, $names, 5 * MINUTE_IN_SECONDS );
+    }
+
+    public static function render_stale_notice() {
+        if ( ! LP_Missing_Util::is_order_screen() ) {
+            return;
+        }
+        $key   = 'lp_missing_stale_' . get_current_user_id();
+        $names = get_transient( $key );
+        if ( ! is_array( $names ) || ! $names ) {
+            return;
+        }
+        delete_transient( $key );
+        echo '<div class="notice notice-warning is-dismissible"><p>' . esc_html( sprintf( __( 'Missing items: these lines changed while the order was open, so your changes to them were not saved: %s. Check them and save again.', 'lp-missing' ), implode( ', ', $names ) ) ) . '</p></div>';
+    }
+
+    /** @var array|null Stale line IDs found before WooCommerce saved the posted items. */
+    protected static $stale_lines = null;
+
+    protected static function save_lines( $order ) {
+        $stale = is_array( self::$stale_lines ) ? self::$stale_lines : self::get_stale_line_ids( $order );
+        self::$stale_lines = null;
         $items = $order->get_items( 'line_item' );
         foreach ( $items as $item_id => $item ) {
             // Lines added after the page was rendered have no fields in this request; leave them untouched.
             if ( ! isset( $_POST['lp_missing_items'][ $item_id ] ) || ! is_array( $_POST['lp_missing_items'][ $item_id ] ) ) {
+                continue;
+            }
+            if ( in_array( $item_id, $stale, true ) ) {
+                self::add_stale_notice( array( $item->get_name() ) );
                 continue;
             }
             $existing = LP_Missing_Line::get_item_data( $item );

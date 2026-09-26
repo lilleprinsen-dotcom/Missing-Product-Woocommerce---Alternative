@@ -87,22 +87,14 @@ class LP_Missing_Notifier {
         if ( ! $email ) {
             return false;
         }
-        $sent = (bool) $email->trigger( $order->get_id(), $order );
+        $provisional = self::assign_deadlines( $order );
+        $sent        = (bool) $email->trigger( $order->get_id(), $order );
         if ( ! $sent ) {
+            self::clear_deadlines( $order, $provisional );
             LP_Missing_Logger::warning( 'Customer email not sent (disabled, no billing email or mail failure).', array( 'order_id' => $order->get_id() ) );
             return false;
         }
-        $now = time();
-        foreach ( $email->get_line_ids() as $item_id ) {
-            $item = $order->get_item( $item_id, false );
-            if ( ! $item || ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
-                continue;
-            }
-            $data                = LP_Missing_Line::get_item_data( $item );
-            $data['notified_at'] = $now;
-            $item->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
-            $item->save();
-        }
+        self::mark_notified( $order, $email->get_line_ids() );
         LP_Missing_Logger::info(
             'Customer email sent.',
             array(
@@ -134,11 +126,14 @@ class LP_Missing_Notifier {
         if ( ! $email ) {
             return false;
         }
-        $sent = (bool) $email->trigger( $order->get_id(), $item_id, $order );
+        $provisional = self::assign_deadlines( $order );
+        $sent        = (bool) $email->trigger( $order->get_id(), $item_id, $order );
         if ( ! $sent ) {
+            self::clear_deadlines( $order, $provisional );
             LP_Missing_Logger::warning( 'Reminder email not sent (disabled, no billing email or mail failure).', array( 'order_id' => $order->get_id() ) );
             return false;
         }
+        self::mark_notified( $order, $email->get_line_ids() );
         LP_Missing_Logger::info(
             'Reminder email sent.',
             array(
@@ -309,5 +304,84 @@ class LP_Missing_Notifier {
                 return __( 'Declined all suggested alternatives', 'lp-missing' );
         }
         return '';
+    }
+
+    /**
+     * Give waiting lines without a deadline one, right before an email that tells the customer about it.
+     * Returns the item IDs that got one, so the deadline can be taken back if the email does not go out.
+     */
+    protected static function assign_deadlines( $order ) {
+        $assigned = array();
+        if ( ! LP_Missing_Deadline::enabled() ) {
+            return $assigned;
+        }
+        $deadline = LP_Missing_Deadline::calculate( time() );
+        foreach ( $order->get_items( 'line_item' ) as $item_id => $item ) {
+            if ( ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
+                continue;
+            }
+            $data = LP_Missing_Line::get_item_data( $item );
+            if ( ! LP_Missing_Line::is_awaiting_customer( $data ) || ! empty( $data['deadline_at'] ) ) {
+                continue;
+            }
+            $written = LP_Missing_Line::update_fields(
+                $item_id,
+                array( 'deadline_at' => $deadline ),
+                $item,
+                function ( $stored ) {
+                    return LP_Missing_Line::is_awaiting_customer( $stored ) && empty( $stored['deadline_at'] );
+                }
+            );
+            if ( $written ) {
+                $assigned[ $item_id ] = $deadline;
+            }
+        }
+        return $assigned;
+    }
+
+    /**
+     * The email was not sent: take back the deadlines assigned for it (unless something else has set another one).
+     */
+    protected static function clear_deadlines( $order, $assigned ) {
+        foreach ( $assigned as $item_id => $deadline ) {
+            LP_Missing_Line::update_fields(
+                $item_id,
+                array( 'deadline_at' => 0 ),
+                $order->get_item( $item_id, false ),
+                function ( $stored ) use ( $deadline ) {
+                    return (int) $stored['deadline_at'] === (int) $deadline;
+                }
+            );
+        }
+    }
+
+    /**
+     * Record what the customer was told for each listed line: when, the missing quantity and the units still
+     * available. The deadline action compares against this and leaves changed lines to staff.
+     */
+    protected static function mark_notified( $order, $item_ids ) {
+        $now = time();
+        foreach ( $item_ids as $item_id ) {
+            $item = $order->get_item( $item_id, false );
+            if ( ! $item || ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
+                continue;
+            }
+            // What the email said comes from the copy it was rendered from; the write goes onto the stored line.
+            $told = LP_Missing_Line::get_item_data( $item );
+            LP_Missing_Line::update_fields(
+                $item_id,
+                array(
+                    'notified_at'        => $now,
+                    'notified_qty'       => $told['qty_missing'],
+                    'notified_available' => LP_Missing_Line::get_item_available_qty( $item ),
+                ),
+                $item,
+                function ( $stored ) {
+                    return ! empty( $stored['missing'] ) && ! LP_Missing_Line::is_line_resolved( $stored );
+                }
+            );
+        }
+        // Schedule the deadline job now that the customer knows about the deadline.
+        LP_Missing_Lifecycle::sync_order_schedule( $order );
     }
 }

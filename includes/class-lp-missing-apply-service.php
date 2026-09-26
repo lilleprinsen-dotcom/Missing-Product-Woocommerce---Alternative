@@ -495,6 +495,7 @@ class LP_Missing_Apply_Service {
 
     public static function is_deadline_due( $data, $now ) {
         return LP_Missing_Line::is_awaiting_customer( $data )
+            && ! empty( $data['notified_at'] )
             && ! empty( $data['deadline_at'] )
             && (int) $data['deadline_at'] <= $now
             && empty( $data['auto_action_failed_at'] );
@@ -535,8 +536,39 @@ class LP_Missing_Apply_Service {
                 if ( ! self::is_deadline_due( $data, $now ) ) {
                     continue;
                 }
+                // Act only on what the customer was told: if staff changed the missing quantity, or refunded/removed units
+                // of the line since, leave it to staff instead of refunding or removing twice.
+                $changed_since = ( $data['notified_qty'] && $data['qty_missing'] !== $data['notified_qty'] )
+                    || ( $data['notified_available'] && LP_Missing_Line::get_item_available_qty( $item ) < $data['notified_available'] );
+                if ( $changed_since ) {
+                    $data['needs_attention']       = true;
+                    $data['auto_action_failed_at'] = $now;
+                    $item->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
+                    $item->save();
+                    LP_Missing_Orders::refresh_order_flags( $order );
+                    $order->add_order_note(
+                        sprintf(
+                            /* translators: %s: product name */
+                            __( 'Decision deadline passed for %s, but the line changed after the customer was notified (quantity, refund or removal). No automatic action taken; handle it manually.', 'lp-missing' ),
+                            $item->get_name()
+                        )
+                    );
+                    LP_Missing_Logger::warning( 'Deadline passed: line changed since notification, left to staff.', array( 'order_id' => $order_id, 'item_id' => absint( $item_id ) ) );
+                    $results[ $item_id ] = array(
+                        'name'    => $item->get_name(),
+                        'qty'     => $data['qty_missing'],
+                        'action'  => 'skipped',
+                        'status'  => 'error',
+                        'message' => __( 'The line changed after the customer was notified.', 'lp-missing' ),
+                        'amount'  => 0,
+                    );
+                    continue;
+                }
                 // Nothing was paid on an unpaid order, so there is nothing to refund: remove the quantity instead.
                 $mode   = 'refund' === $configured && $order->is_paid() ? 'refund' : 'reduce';
+                if ( 'reduce' === $mode && $order->is_paid() ) {
+                    $order->add_order_note( __( 'Deadline action "remove from order totals" on a paid order: the customer has paid for the removed quantity. Release or refund it with the payment provider.', 'lp-missing' ) );
+                }
                 $name   = $item->get_name();
                 $qty    = $data['qty_missing'];
                 $result = self::apply_delete_decision( $order, $item, $item_id, $data, $mode, 'automatic' );

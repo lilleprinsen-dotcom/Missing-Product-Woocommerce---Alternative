@@ -33,6 +33,8 @@ class LP_Missing_Line {
             'pricing_snapshot'=> array(),
             'deadline_at'     => 0,
             'notified_at'     => 0,
+            'notified_qty'    => 0,
+            'notified_available' => 0,
         );
     }
 
@@ -61,6 +63,8 @@ class LP_Missing_Line {
         $data['pricing_snapshot'] = is_array( $data['pricing_snapshot'] ) ? $data['pricing_snapshot'] : array();
         $data['deadline_at'] = absint( $data['deadline_at'] );
         $data['notified_at'] = absint( $data['notified_at'] );
+        $data['notified_qty'] = absint( $data['notified_qty'] );
+        $data['notified_available'] = absint( $data['notified_available'] );
 
         if ( 'alt_accepted' === $data['status'] ) {
             $data['status'] = 'alt_pending';
@@ -111,5 +115,62 @@ class LP_Missing_Line {
 
     public static function is_awaiting_customer( $data ) {
         return ! empty( $data['missing'] ) && ! self::is_line_resolved( $data ) && ! self::has_customer_decision( $data );
+    }
+
+    /**
+     * Fingerprint of what a stale order screen must not overwrite: the case state and the line quantities.
+     * Rendered into the order screen and compared on save.
+     */
+    public static function get_revision( $item ) {
+        $data = self::get_item_data( $item );
+        $parts = array(
+            (int) $data['missing'],
+            $data['status'],
+            $data['qty_missing'],
+            $data['selected_alt_id'],
+            $data['qty_alt'],
+            $data['resolved_at'],
+            $item->get_quantity(),
+            absint( $item->get_meta( LP_Missing_Plugin::MOVED_QTY_META, true ) ),
+        );
+        return substr( md5( implode( '|', $parts ) ), 0, 12 );
+    }
+
+    /**
+     * Fingerprint of the customer's current decision (what staff see next to the apply buttons). Apply links carry it,
+     * so a link rendered before the customer changed their mind does not apply the new choice unseen.
+     */
+    public static function get_decision_key( $data ) {
+        $parts = array( $data['status'], (int) $data['selected_alt_id'], (int) $data['qty_alt'], (int) $data['qty_missing'], (int) $data['decision_made_at'] );
+        return substr( md5( implode( '|', $parts ) ), 0, 10 );
+    }
+
+    /**
+     * Merge fields into a line's stored data, re-reading the line first so that changes other requests saved after
+     * the caller loaded the order (a customer's choice, a staff edit) are kept. The caller's copy of the line, when
+     * given, is updated to the same merged data.
+     *
+     * @param int                $item_id
+     * @param array              $fields    Fields to set.
+     * @param WC_Order_Item|null $loaded    The caller's copy of the line.
+     * @param callable|null      $condition Receives the stored data; nothing is written unless it returns true.
+     * @return bool Whether the fields were written.
+     */
+    public static function update_fields( $item_id, $fields, $loaded = null, $condition = null ) {
+        $item = WC_Order_Factory::get_order_item( absint( $item_id ) );
+        if ( ! $item instanceof WC_Order_Item || ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
+            return false;
+        }
+        $data = self::get_item_data( $item );
+        if ( $condition && ! call_user_func( $condition, $data ) ) {
+            return false;
+        }
+        $data = array_merge( $data, $fields );
+        $item->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
+        $item->save();
+        if ( $loaded instanceof WC_Order_Item ) {
+            $loaded->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
+        }
+        return true;
     }
 }

@@ -12,7 +12,7 @@ tests/bin/setup-env.sh /tmp/lpm-env      # WordPress 7.1.2 + WooCommerce 11.1.2 
 
 ```bash
 WP="php /tmp/lpm-env/wp-cli.phar --allow-root --path=/tmp/lpm-env/site"
-for t in test-plugin test-admin test-portal test-notify; do $WP eval-file tests/integration/$t.php | tail -1; done
+for t in test-plugin test-admin test-portal test-notify test-review; do $WP eval-file tests/integration/$t.php | tail -1; done
 ```
 
 | File | Covers |
@@ -21,6 +21,7 @@ for t in test-plugin test-admin test-portal test-notify; do $WP eval-file tests/
 | `test-admin.php` | Order screen, order list views/column, AJAX endpoints, link tools |
 | `test-portal.php` | Customer links (v1/v2, expiry, revocation, cookie), portal form, decision changes, headers, page setup |
 | `test-notify.php` | Action Scheduler, reminders, deadline action, emails, customer notes, hooks |
+| `test-review.php` | Regressions from code review: stale order screens and apply links, concurrent writes, deadline safety, portal hardening |
 
 Shared helpers live in `bootstrap.php` (and `portal-helpers.php` for portal requests).
 

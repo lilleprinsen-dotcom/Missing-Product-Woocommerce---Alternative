@@ -35,8 +35,9 @@ class LP_Missing_Portal_Setup {
      * register_activation_hook() callback.
      */
     public static function activate() {
+        LP_Missing_Magic_Link::get_keyring();
         if ( self::woocommerce_ready() ) {
-            self::ensure_portal_page();
+            self::setup_portal_page_once();
         } else {
             // WooCommerce is not loaded yet (e.g. activated in the same request): finish on the next page load.
             update_option( self::OPTION_PENDING, 1, false );
@@ -46,8 +47,20 @@ class LP_Missing_Portal_Setup {
     public static function maybe_finish_activation() {
         if ( get_option( self::OPTION_PENDING ) && self::woocommerce_ready() ) {
             delete_option( self::OPTION_PENDING );
-            self::ensure_portal_page();
+            self::setup_portal_page_once();
         }
+    }
+
+    /**
+     * Set up the portal page the first time only. Later activations and upgrades leave the shop's choice alone,
+     * including a deliberate "My Account page" (0); a missing page is reported by the admin notice instead.
+     */
+    public static function setup_portal_page_once() {
+        if ( get_option( self::OPTION_SETUP_DONE ) ) {
+            return;
+        }
+        self::ensure_portal_page();
+        update_option( self::OPTION_SETUP_DONE, time(), false );
     }
 
     public static function add_upgrade_steps( $steps ) {
@@ -62,10 +75,7 @@ class LP_Missing_Portal_Setup {
     public static function upgrade() {
         LP_Missing_Magic_Link::record_v1_cutoff();
         LP_Missing_Magic_Link::get_keyring();
-        if ( ! get_option( self::OPTION_SETUP_DONE ) ) {
-            self::ensure_portal_page();
-            update_option( self::OPTION_SETUP_DONE, time(), false );
-        }
+        self::setup_portal_page_once();
     }
 
     public static function is_valid_portal_page( $page_id ) {

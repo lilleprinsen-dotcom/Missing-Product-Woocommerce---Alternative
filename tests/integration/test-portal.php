@@ -63,6 +63,9 @@ function tp_log_since( $sizes ) {
 	return $out;
 }
 $tp_log_start = tp_log_size();
+// Warnings anonymous visitors can trigger are throttled; start with a fresh budget so this run's are logged.
+delete_transient( 'lp_missing_log_link_invalid' );
+delete_transient( 'lp_missing_log_preview_refused' );
 $tp_hooks     = array( 'decision' => array(), 'updated' => 0 );
 add_action( 'lp_missing_customer_decision', function ( $order, $item_id, $new, $old ) use ( &$tp_hooks ) {
 	$tp_hooks['decision'][] = array( 'order' => $order, 'item_id' => $item_id, 'new' => $new, 'old' => $old );
@@ -529,6 +532,7 @@ foreach ( $existing_pages as $p ) {
 }
 tp_set( array( 'portal_page_id' => 0, 'portal_base_url' => '' ) );
 update_option( 'lp_missing_portal_url', '' );
+delete_option( 'lp_missing_portal_setup_done' );
 LP_Missing_Settings::flush();
 LP_Missing_Portal_Setup::activate();
 $created = absint( LP_Missing_Settings::get_settings( true )['portal_page_id'] );
@@ -538,6 +542,10 @@ t_ok( $page && 0 === strpos( $page->post_name, 'velg-erstatning' ) && has_shortc
 LP_Missing_Portal_Setup::activate();
 t_eq( $created, absint( LP_Missing_Settings::get_settings( true )['portal_page_id'] ), 'activating again keeps the page' );
 t_ok( 0 === strpos( call( 'get_magic_link_for_order', $o6 ), get_permalink( $created ) ), 'links point at the new portal page' );
+tp_set( array( 'portal_page_id' => 0 ) );
+LP_Missing_Portal_Setup::activate();
+t_eq( 0, absint( LP_Missing_Settings::get_settings( true )['portal_page_id'] ), 'reactivating keeps a deliberate "My Account page" choice' );
+tp_set( array( 'portal_page_id' => $created ) );
 // Upgrade path for existing installs.
 tp_set( array( 'portal_page_id' => 0 ) );
 delete_option( 'lp_missing_portal_setup_done' );
@@ -589,6 +597,7 @@ tp_set( array( 'portal_page_id' => $created ) );
 t_eq( '', LP_Missing_Portal_Setup::get_portal_page_problem(), 'no problem with a valid portal page' );
 update_option( LP_Missing_Portal_Setup::OPTION_PENDING, 1 );
 tp_set( array( 'portal_page_id' => 0 ) );
+delete_option( 'lp_missing_portal_setup_done' ); // A first activation.
 LP_Missing_Portal_Setup::maybe_finish_activation();
 t_ok( ! get_option( LP_Missing_Portal_Setup::OPTION_PENDING ) && $created === absint( LP_Missing_Settings::get_settings( true )['portal_page_id'] ), 'deferred activation finishes on a later request' );
 // Restore the site.

@@ -30,7 +30,7 @@ class LP_Missing_Settings {
             'reminder_window_start'       => array( 'section' => 'reminders', 'type' => 'int', 'default' => 9, 'min' => 0, 'max' => 23, 'label' => __( 'Send reminders from (hour)', 'lp-missing' ), 'description' => __( 'Reminders are only sent between these hours, in the site time zone.', 'lp-missing' ) ),
             'reminder_window_end'         => array( 'section' => 'reminders', 'type' => 'int', 'default' => 20, 'min' => 1, 'max' => 24, 'label' => __( 'Send reminders until (hour)', 'lp-missing' ), 'description' => '' ),
             // Decision deadline (default action).
-            'deadline_action'             => array( 'section' => 'deadline', 'type' => 'select', 'default' => 'none', 'options' => array( 'none' => __( 'No automatic action (escalate to staff only)', 'lp-missing' ), 'refund' => __( 'Refund the missing quantity', 'lp-missing' ), 'reduce' => __( 'Remove the missing quantity from the order totals', 'lp-missing' ) ), 'label' => __( 'When the customer does not answer in time', 'lp-missing' ), 'description' => __( 'The deadline is shown in emails and in the portal when an action is chosen.', 'lp-missing' ) ),
+            'deadline_action'             => array( 'section' => 'deadline', 'type' => 'select', 'default' => 'none', 'options' => array( 'none' => __( 'No automatic action (escalate to staff only)', 'lp-missing' ), 'refund' => __( 'Refund the missing quantity', 'lp-missing' ), 'reduce' => __( 'Remove the missing quantity from the order totals (for payments captured at shipping; paid amounts are not refunded)', 'lp-missing' ) ), 'label' => __( 'When the customer does not answer in time', 'lp-missing' ), 'description' => __( 'The deadline starts when the customer is emailed and is shown in emails and in the portal. Unpaid orders always have the quantity removed. Lines changed after the customer was notified are left to staff.', 'lp-missing' ) ),
             'decision_deadline_days'      => array( 'section' => 'deadline', 'type' => 'int', 'default' => 5, 'min' => 1, 'label' => __( 'Deadline (days after the first email)', 'lp-missing' ), 'description' => '' ),
             'deadline_hour'               => array( 'section' => 'deadline', 'type' => 'int', 'default' => 12, 'min' => 0, 'max' => 23, 'label' => __( 'Deadline time of day (hour)', 'lp-missing' ), 'description' => '' ),
             // Prices.
@@ -73,6 +73,9 @@ class LP_Missing_Settings {
     }
 
     public static function sanitize_field( $field, $value ) {
+        if ( null !== $value && ! is_scalar( $value ) ) {
+            return $field['default'];
+        }
         switch ( $field['type'] ) {
             case 'checkbox':
                 return 'yes' === $value ? 'yes' : 'no';
@@ -88,7 +91,9 @@ class LP_Missing_Settings {
             case 'amount':
                 return (float) wc_format_decimal( max( 0, (float) $value ), wc_get_price_decimals() );
             case 'page':
-                return absint( $value );
+                // Only a real page (not a product or another post type) can be the portal page.
+                $value = absint( $value );
+                return $value && 'page' === get_post_type( $value ) ? $value : absint( $field['default'] );
             case 'url':
                 return esc_url_raw( trim( (string) $value ) );
             case 'email':
