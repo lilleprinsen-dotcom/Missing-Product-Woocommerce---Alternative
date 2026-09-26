@@ -52,6 +52,7 @@ class LP_Missing_Plugin {
             'LP_Missing_Portal',
             'LP_Missing_Notifier',
             'LP_Missing_Lifecycle',
+            'LP_Missing_Scheduler',
             'LP_Missing_Stock',
         );
     }
@@ -62,7 +63,9 @@ class LP_Missing_Plugin {
      */
     public static function upgrades() {
         $steps = array(
-            '1.2.0' => array( 'LP_Missing_Orders', 'upgrade_normalize_open_cases' ),
+            '1.2.0'   => array( 'LP_Missing_Orders', 'upgrade_normalize_open_cases' ),
+            // Reminders, cleanup and the daily sweep move from WP-Cron to Action Scheduler (one reminder per order).
+            '1.2.0.1' => array( 'LP_Missing_Scheduler', 'upgrade_migrate_wp_cron' ),
         );
         /**
          * Filter the upgrade steps.

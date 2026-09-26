@@ -18,7 +18,7 @@ $d = item_data( $o->get_id(), $iid );
 t_eq( 'pending', $d['status'], 'marked line is pending' );
 t_eq( 2, $d['qty_missing'], 'qty_missing stored' );
 t_eq( 1, count( $GLOBALS['lp_mails'] ), 'customer portal email sent once' );
-t_ok( (bool) wp_next_scheduled( 'lp_missing_send_reminder', array( $o->get_id(), $iid ) ), 'reminder scheduled' );
+t_ok( call( 'get_next_reminder_timestamp', $o ) > time(), 'reminder scheduled' );
 t_eq( 'yes', wc_get_order( $o->get_id() )->get_meta( '_lp_missing_has_open' ), 'order flagged open' );
 // Clear then re-mark (the old code left status 'cleared' and treated the re-marked line as resolved).
 admin_save( $o, array() );
@@ -156,7 +156,7 @@ t_eq( 200.0, (float) $o->get_total(), 'order total unchanged at 200 after swap' 
 t_eq( 40.0, order_tax_lines_total( $o ), 'tax lines unchanged' );
 t_eq( 0, count( wc_get_orders( array( 'parent' => $o->get_id(), 'type' => 'shop_order', 'limit' => -1 ) ) ), 'cheaper alternative: no surcharge order' );
 t_eq( '', $o->get_meta( '_lp_missing_has_open' ), 'flags refreshed although the line was removed' );
-t_ok( ! wp_next_scheduled( 'lp_missing_send_reminder', array( $o->get_id(), $iid ) ), 'reminder for removed line cleared' );
+t_ok( ! call( 'get_next_reminder_timestamp', $o ), 'reminder for removed line cleared' );
 
 echo "\n[Bug 4] Apply alternative - add mode, then partial again\n";
 $o = make_order( $A, 5 );
@@ -179,8 +179,9 @@ t_eq( 500.0, (float) $o->get_total(), 'order total unchanged' );
 $d = item_data( $o->get_id(), $iid );
 t_eq( 'pending', $d['status'], 'partial apply re-opens remaining qty for the customer' );
 t_eq( 2, $d['qty_missing'], 'remaining missing qty = 2' );
-t_eq( 1, count( $GLOBALS['lp_mails'] ), 'customer notified about the remaining quantity' );
-t_ok( (bool) wp_next_scheduled( 'lp_missing_send_reminder', array( $o->get_id(), $iid ) ), 'reminder re-scheduled for remaining qty' );
+// The customer also gets the "what changed" customer note (S2); count the portal emails.
+t_eq( 1, count( array_filter( $GLOBALS['lp_mails'], function ( $m ) { return false !== strpos( $m['subject'], 'Velg erstatning' ); } ) ), 'customer notified about the remaining quantity' );
+t_ok( call( 'get_next_reminder_timestamp', $o ) > time(), 'reminder re-scheduled for remaining qty' );
 t_eq( 4, call( 'get_item_billable_qty', $orig ), 'billable qty tracks units moved in add mode' );
 t_eq( 100.0, call( 'get_item_unit_price_incl_tax', $orig ), 'unit price still 100 incl after add mode' );
 
@@ -339,7 +340,7 @@ $o = wc_get_order( $o->get_id() );
 $o->update_status( 'cancelled' );
 t_eq( $before_order, wc_get_product( $S->get_id() )->get_stock_quantity(), 'cancelling restores order stock and releases the lock' );
 t_eq( 'cleared', item_data( $o->get_id(), $iid )['status'], 'cancelled order closes the missing case' );
-t_ok( ! wp_next_scheduled( 'lp_missing_send_reminder', array( $o->get_id(), $iid ) ), 'cancelled order has no reminders left' );
+t_ok( ! call( 'get_next_reminder_timestamp', $o ), 'cancelled order has no reminders left' );
 
 update_option( 'lp_missing_settings', array_merge( get_option( 'lp_missing_settings', array() ), array( 'enable_stock_lock' => 'no' ) ) );
 $r = new ReflectionProperty( 'LP_Missing_Settings', 'settings' ); $r->setAccessible( true ); $r->setValue( null, null );
@@ -422,7 +423,7 @@ echo "\n[New] Cleanup events\n";
 $o = make_order( $A, 1 );
 admin_save( $o, array() );
 call( 'handle_cleanup_order', $o->get_id() );
-t_ok( ! wp_next_scheduled( 'lp_missing_cleanup_order', array( $o->get_id() ) ), 'orders without plugin data get no cleanup event' );
+t_ok( ! LP_Missing_Scheduler::next( 'lp_missing_cleanup_order', array( $o->get_id() ) ), 'orders without plugin data get no cleanup event' );
 
 // ---------- Reminders ----------
 echo "\n[New] Reminders\n";
@@ -432,8 +433,9 @@ $o->calculate_totals( true );
 $ids = array_keys( wc_get_order( $o->get_id() )->get_items() );
 admin_save( wc_get_order( $o->get_id() ), array( $ids[0] => array( 'missing' => '1', 'qty_missing' => '1' ), $ids[1] => array( 'missing' => '1', 'qty_missing' => '1' ) ) );
 $GLOBALS['lp_mails'] = array();
-call( 'handle_scheduled_reminder', $o->get_id(), $ids[0] );
-call( 'handle_scheduled_reminder', $o->get_id(), $ids[1] );
+// One reminder per order (the job itself also checks the reminder window; see test-notify.php).
+call( 'send_order_reminder', wc_get_order( $o->get_id() ) );
+call( 'send_order_reminder', wc_get_order( $o->get_id() ) );
 t_eq( 1, count( $GLOBALS['lp_mails'] ), 'two missing lines produce one reminder email' );
 t_ok( ! empty( $GLOBALS['lp_mails'] ) && false !== strpos( $GLOBALS['lp_mails'][0]['message'], 'Bleier eco' ) && false !== strpos( $GLOBALS['lp_mails'][0]['message'], 'Bleier str 4' ), 'reminder names every waiting line' );
 t_eq( 1, item_data( $o->get_id(), $ids[1] )['reminder_count'], 'deduplicated line still counts the reminder' );
@@ -555,7 +557,7 @@ admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1' ) )
 $item = wc_get_order( $o->get_id() )->get_item( $iid, false );
 $data = call( 'get_item_data', $item ); $data['first_missing_at'] = time() - 30 * DAY_IN_SECONDS;
 $item->update_meta_data( '_lp_missing_data', $data ); $item->save();
-call( 'handle_scheduled_reminder', $o->get_id(), $iid );
+call( 'send_order_reminder', wc_get_order( $o->get_id() ) );
 t_ok( item_data( $o->get_id(), $iid )['needs_attention'], 'old unanswered line escalates although the reminder is disabled' );
 update_option( 'woocommerce_lp_missing_customer_reminder_settings', array( 'enabled' => 'yes' ) );
 
@@ -619,7 +621,7 @@ admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '2' ) )
 t_eq( $base - 2, wc_get_product( $L->get_id() )->get_stock_quantity(), 'lock taken' );
 wc_get_order( $o->get_id() )->delete( true );
 t_eq( $base, wc_get_product( $L->get_id() )->get_stock_quantity(), 'permanently deleting the order releases the lock' );
-t_ok( ! wp_next_scheduled( 'lp_missing_send_reminder', array( $o->get_id(), $iid ) ) && ! ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( 'lp_missing_send_reminder', array( $o->get_id(), $iid ) ) ), 'deleted order has no reminder left' );
+t_ok( ! wp_next_scheduled( 'lp_missing_send_reminder', array( $o->get_id(), $iid ) ) && ! LP_Missing_Scheduler::next( 'lp_missing_order_reminder', array( $o->get_id() ) ), 'deleted order has no reminder left' );
 
 echo "\n[Verify] Portal input and access\n";
 $o = make_order( $A, 1 );
