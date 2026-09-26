@@ -1,0 +1,495 @@
+/* Customer portal ([lp_missing_items]). Loaded only on portal pages. */
+
+.lp-missing-portal {
+    --lp-text: #1f2937;
+    --lp-muted: #4b5563;
+    --lp-border: #d1d5db;
+    --lp-card: #ffffff;
+    --lp-soft: #f3f4f6;
+    --lp-accent: #1d4ed8;
+    --lp-accent-soft: #eff6ff;
+    --lp-success: #047857;
+    --lp-success-soft: #ecfdf5;
+    --lp-error: #b91c1c;
+    --lp-error-soft: #fef2f2;
+    --lp-warning: #92400e;
+    --lp-warning-soft: #fffbeb;
+    --lp-radius: 12px;
+    --lp-focus: 3px solid #1d4ed8;
+
+    display: grid;
+    gap: 16px;
+    max-width: 46rem;
+    margin: 0 auto 24px;
+    color: var(--lp-text);
+    font-family: inherit;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.lp-missing-portal *,
+.lp-missing-portal *::before,
+.lp-missing-portal *::after {
+    box-sizing: border-box;
+}
+
+.lp-missing-portal p {
+    margin: 0 0 8px;
+}
+
+.lp-missing-portal p:last-child {
+    margin-bottom: 0;
+}
+
+.lp-missing-portal .screen-reader-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* Cards */
+.lp-portal-card {
+    background: var(--lp-card);
+    border: 1px solid var(--lp-border);
+    border-radius: var(--lp-radius);
+    padding: 16px;
+    margin: 0;
+    min-width: 0; /* Fieldsets otherwise grow past narrow screens. */
+}
+
+.lp-portal-title {
+    margin: 0 0 4px;
+    font-size: 1.375rem;
+    line-height: 1.3;
+}
+
+.lp-portal-muted {
+    color: var(--lp-muted);
+    font-size: 0.9375rem;
+}
+
+.lp-portal-deadline {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--lp-warning-soft);
+    color: var(--lp-warning);
+}
+
+.lp-portal-banner {
+    margin: 0;
+    padding: 12px 16px;
+    border-radius: var(--lp-radius);
+    background: var(--lp-accent-soft);
+    border: 1px dashed var(--lp-accent);
+    color: var(--lp-accent);
+    font-weight: 600;
+}
+
+/* Notices */
+.lp-portal-notices:empty {
+    display: none;
+}
+
+.lp-portal-notice {
+    padding: 12px 16px;
+    border-radius: var(--lp-radius);
+    border: 1px solid var(--lp-border);
+    background: var(--lp-soft);
+}
+
+.lp-portal-notice:focus {
+    outline: none;
+}
+
+.lp-portal-notice:focus-visible {
+    outline: var(--lp-focus);
+    outline-offset: 2px;
+}
+
+.lp-portal-notice--success {
+    background: var(--lp-success-soft);
+    border-color: var(--lp-success);
+}
+
+.lp-portal-notice--error {
+    background: var(--lp-error-soft);
+    border-color: var(--lp-error);
+    color: var(--lp-error);
+}
+
+.lp-portal-notice--info {
+    background: var(--lp-accent-soft);
+    border-color: var(--lp-accent);
+}
+
+/* One missing line */
+.lp-portal-item {
+    display: block;
+}
+
+.lp-portal-item__legend {
+    float: left; /* Keeps the legend inside the card instead of on its border. */
+    width: 100%;
+    margin: 0 0 12px;
+    padding: 0;
+    font-size: 1.125rem;
+    font-weight: 700;
+    line-height: 1.3;
+}
+
+.lp-portal-item__legend + * {
+    clear: both;
+}
+
+.lp-portal-item__head {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    margin-bottom: 12px;
+}
+
+.lp-portal-item__img,
+.lp-option__img {
+    flex: 0 0 auto;
+    width: 72px;
+    height: 72px;
+    object-fit: cover;
+    border-radius: 8px;
+    background: var(--lp-soft);
+}
+
+.lp-option__img {
+    width: 64px;
+    height: 64px;
+}
+
+.lp-portal-item__info {
+    min-width: 0;
+}
+
+.lp-pill {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--lp-soft);
+    font-size: 0.875rem;
+}
+
+.lp-portal-decision {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border-left: 4px solid var(--lp-success);
+    border-radius: 4px;
+    background: var(--lp-success-soft);
+}
+
+.lp-portal-warning {
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--lp-warning-soft);
+    color: var(--lp-warning);
+}
+
+.lp-portal-line-error {
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--lp-error-soft);
+    color: var(--lp-error);
+    font-weight: 600;
+}
+
+.lp-portal-options__title {
+    margin-top: 4px;
+    font-weight: 600;
+}
+
+/* Answer cards (radio) */
+.lp-portal-options {
+    display: grid;
+    gap: 8px;
+}
+
+.lp-option {
+    position: relative;
+}
+
+.lp-option__label {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    min-height: 44px;
+    margin: 0;
+    padding: 12px;
+    border: 2px solid var(--lp-border);
+    border-radius: 10px;
+    background: var(--lp-card);
+    cursor: pointer;
+    font-weight: 400;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.lp-option__label:hover {
+    border-color: var(--lp-accent);
+}
+
+.lp-option__label:has(.lp-option__input:checked) {
+    border-color: var(--lp-accent);
+    background: var(--lp-accent-soft);
+}
+
+.lp-option__label:has(.lp-option__input:focus-visible) {
+    outline: var(--lp-focus);
+    outline-offset: 2px;
+}
+
+.lp-option__label:has(.lp-option__input:disabled) {
+    cursor: default;
+}
+
+.lp-option__input {
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    margin: 2px 0 0;
+    accent-color: var(--lp-accent);
+}
+
+.lp-option__input:focus-visible {
+    outline: var(--lp-focus);
+    outline-offset: 2px;
+}
+
+.lp-option__body {
+    display: flex;
+    flex: 1 1 auto;
+    gap: 12px;
+    align-items: flex-start;
+    min-width: 0;
+}
+
+.lp-option__text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+.lp-option__name {
+    font-weight: 700;
+}
+
+.lp-option__icon {
+    font-size: 1.25rem;
+    line-height: 1.2;
+}
+
+.lp-option__price {
+    font-weight: 600;
+}
+
+.lp-option__per-kg {
+    margin-left: 6px;
+    color: var(--lp-muted);
+    font-weight: 400;
+}
+
+.lp-option__diff,
+.lp-option__stock {
+    color: var(--lp-muted);
+    font-size: 0.9375rem;
+}
+
+.lp-option__stock {
+    color: var(--lp-warning);
+}
+
+.lp-option__link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 12px;
+    color: var(--lp-accent);
+    font-size: 0.9375rem;
+    text-decoration: underline;
+}
+
+.lp-option__link:focus-visible {
+    outline: var(--lp-focus);
+    outline-offset: 2px;
+}
+
+.lp-badge {
+    justify-self: start;
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.8125rem;
+    font-weight: 700;
+}
+
+.lp-badge--low {
+    background: var(--lp-warning-soft);
+    color: var(--lp-warning);
+    border: 1px solid #f59e0b;
+}
+
+/* Quantity */
+.lp-portal-qty {
+    display: grid;
+    gap: 6px;
+    margin-top: 12px;
+}
+
+.lp-portal-qty label {
+    font-weight: 600;
+}
+
+.lp-missing-portal input[type="number"],
+.lp-missing-portal input[type="email"] {
+    width: 100%;
+    max-width: 22rem;
+    min-height: 48px;
+    padding: 10px 12px;
+    border: 2px solid var(--lp-border);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--lp-text);
+    font-size: max(16px, 1rem); /* 16px or more: no zoom on iOS. */
+}
+
+.lp-missing-portal input[type="number"] {
+    max-width: 8rem;
+}
+
+.lp-missing-portal input[type="number"]:disabled {
+    background: var(--lp-soft);
+    color: var(--lp-muted);
+}
+
+.lp-missing-portal input:focus-visible {
+    outline: var(--lp-focus);
+    outline-offset: 2px;
+    border-color: var(--lp-accent);
+}
+
+/* Summary and actions */
+.lp-portal-summary {
+    background: var(--lp-soft);
+}
+
+.lp-portal-summary__title {
+    margin: 0 0 8px;
+    font-size: 1.125rem;
+}
+
+.lp-portal-summary__lines {
+    margin: 0 0 8px;
+    padding-left: 20px;
+}
+
+.lp-portal-summary__lines li {
+    margin-bottom: 4px;
+}
+
+.lp-portal-form {
+    display: grid;
+    gap: 16px;
+}
+
+.lp-portal-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.lp-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 48px;
+    min-width: 44px;
+    padding: 12px 20px;
+    border: 2px solid transparent;
+    border-radius: 10px;
+    font-size: max(16px, 1rem);
+    font-weight: 700;
+    line-height: 1.2;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.lp-btn--primary {
+    background: var(--lp-accent);
+    color: #fff;
+}
+
+.lp-btn--primary:hover {
+    background: #1e40af;
+}
+
+.lp-btn--secondary {
+    background: #fff;
+    border-color: var(--lp-accent);
+    color: var(--lp-accent);
+}
+
+.lp-btn:focus-visible {
+    outline: var(--lp-focus);
+    outline-offset: 3px;
+}
+
+/* Email confirmation */
+.lp-portal-verify-form {
+    display: grid;
+    gap: 8px;
+    margin: 12px 0;
+}
+
+.lp-portal-verify-form label {
+    font-weight: 600;
+}
+
+.lp-portal-verify-form .lp-btn {
+    justify-self: start;
+}
+
+.lp-portal-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+@media (max-width: 480px) {
+    .lp-portal-card {
+        padding: 12px;
+    }
+
+    .lp-portal-item__img {
+        width: 56px;
+        height: 56px;
+    }
+
+    .lp-option__img {
+        width: 48px;
+        height: 48px;
+    }
+
+    .lp-portal-actions .lp-btn {
+        width: 100%;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .lp-option__label {
+        transition: none;
+    }
+}

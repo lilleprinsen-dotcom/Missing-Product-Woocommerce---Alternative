@@ -61,6 +61,9 @@ if ( ! function_exists( 'lp_missing_bootstrap_plugin' ) ) {
 
 add_action( 'plugins_loaded', 'lp_missing_bootstrap_plugin', 20 );
 
+// Creates the "Velg erstatning" customer portal page when no valid portal page is configured.
+register_activation_hook( __FILE__, array( 'LP_Missing_Portal_Setup', 'activate' ) );
+
 // The daily cleanup is a recurring event; without this it keeps being re-armed after deactivation.
 register_deactivation_hook(
     __FILE__,
