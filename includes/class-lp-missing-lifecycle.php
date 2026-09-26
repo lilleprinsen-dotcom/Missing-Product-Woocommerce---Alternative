@@ -298,13 +298,12 @@ class LP_Missing_Lifecycle {
         $item->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
         $item->save();
 
-        if ( ! $sent ) {
-            self::schedule_reminder_for_item( $order, $item_id );
-            return;
-        }
-
+        // Escalation does not depend on the email going out: an unanswered line that is too old always goes to staff.
         $age_days = $data['first_missing_at'] ? floor( ( time() - $data['first_missing_at'] ) / DAY_IN_SECONDS ) : 0;
         $settings = LP_Missing_Settings::get_settings();
+        if ( ! $sent ) {
+            LP_Missing_Logger::warning( 'Reminder email could not be sent.', array( 'order_id' => $order->get_id(), 'item_id' => $item_id ) );
+        }
         if ( $data['reminder_count'] >= $settings['reminder_max_count'] || $age_days >= $settings['reminder_max_age_days'] ) {
             if ( empty( $data['needs_attention'] ) ) {
                 $note = sprintf(

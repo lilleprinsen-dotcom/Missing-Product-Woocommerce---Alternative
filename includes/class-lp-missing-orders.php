@@ -139,4 +139,45 @@ class LP_Missing_Orders {
 
         return 0;
     }
+
+    /**
+     * Upgrade step: repair open cases saved by earlier versions (missing quantity 0, or a stock lock recorded for a
+     * product that does not manage stock, which was never taken).
+     */
+    public static function upgrade_normalize_open_cases() {
+        $page = 1;
+        do {
+            $orders = wc_get_orders( array(
+                'type'       => 'shop_order',
+                'limit'      => 100,
+                'paged'      => $page,
+                'return'     => 'objects',
+                'meta_key'   => LP_Missing_Plugin::OPTION_HAS_MISSING_DATA,
+                'meta_value' => 'yes',
+            ) );
+            foreach ( $orders as $order ) {
+                foreach ( $order->get_items( 'line_item' ) as $item ) {
+                    if ( ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
+                        continue;
+                    }
+                    $data    = LP_Missing_Line::get_item_data( $item );
+                    $changed = false;
+                    if ( ! empty( $data['missing'] ) && ! LP_Missing_Line::is_line_resolved( $data ) && $data['qty_missing'] < 1 ) {
+                        $data['qty_missing'] = max( 1, LP_Missing_Line::get_item_available_qty( $item ) );
+                        $changed = true;
+                    }
+                    $product = $item->get_product();
+                    if ( $data['stock_locked_qty'] && ( ! $product || ! $product->managing_stock() ) ) {
+                        $data['stock_locked_qty'] = 0;
+                        $changed = true;
+                    }
+                    if ( $changed ) {
+                        $item->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
+                        $item->save();
+                    }
+                }
+            }
+            $page++;
+        } while ( count( $orders ) === 100 );
+    }
 }

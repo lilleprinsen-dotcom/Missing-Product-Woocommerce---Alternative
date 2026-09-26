@@ -463,13 +463,13 @@ $data = call( 'get_item_data', $item );
 $data['status'] = 'alt_pending'; $data['selected_alt_id'] = $Alt->get_id(); $data['qty_alt'] = 2;
 $item->update_meta_data( '_lp_missing_data', $data ); $item->save();
 apply_via_handler( $o->get_id(), $iid, 'alternative', 'replace' );
-t_eq( 47, wc_get_product( $S->get_id() )->get_stock_quantity(), 'apply: lock released and 2 units restocked for the reduced line' );
+t_eq( 45, wc_get_product( $S->get_id() )->get_stock_quantity(), 'apply: lock released; confirmed-missing units do not return to stock' );
 t_eq( 48, wc_get_product( $Alt->get_id() )->get_stock_quantity(), 'apply: alternative stock reduced by 2' );
 $o = wc_get_order( $o->get_id() );
 t_eq( 3, (int) $o->get_item( $iid, false )->get_meta( '_reduced_stock' ), 'original line _reduced_stock follows new quantity' );
 // What a later "Update" in the order screen does: must not move stock again.
 foreach ( $o->get_items() as $it ) { wc_maybe_adjust_line_item_product_stock( $it ); }
-t_eq( 47, wc_get_product( $S->get_id() )->get_stock_quantity(), 'later order Update does not change original stock again' );
+t_eq( 45, wc_get_product( $S->get_id() )->get_stock_quantity(), 'later order Update does not change original stock again' );
 t_eq( 48, wc_get_product( $Alt->get_id() )->get_stock_quantity(), 'later order Update does not change alternative stock again' );
 
 $o = make_order( $S, 2 );
@@ -513,11 +513,11 @@ $item = wc_get_order( $o->get_id() )->get_item( $iid, false );
 $data = call( 'get_item_data', $item );
 $data['status'] = 'alt_pending'; $data['selected_alt_id'] = $B->get_id(); $data['qty_alt'] = 1;
 $item->update_meta_data( '_lp_missing_data', $data ); $item->save();
-t_ok( call( 'acquire_apply_lock', $iid ), 'first request takes the apply lock' );
+t_ok( call( 'acquire_apply_lock', $o->get_id() ), 'first request takes the apply lock' );
 $redirect = apply_via_handler( $o->get_id(), $iid, 'alternative', 'replace' );
 t_ok( false !== strpos( $redirect, 'lp_missing_apply=error' ), 'concurrent second apply is refused' );
 t_eq( 1, count( wc_get_order( $o->get_id() )->get_items() ), 'no alternative line added by the refused request' );
-call( 'release_apply_lock', $iid );
+call( 'release_apply_lock', $o->get_id() );
 $redirect = apply_via_handler( $o->get_id(), $iid, 'alternative', 'replace' );
 t_ok( false !== strpos( $redirect, 'lp_missing_apply=success' ), 'apply works once the lock is free' );
 $redirect = apply_via_handler( $o->get_id(), $iid, 'alternative', 'replace' );
@@ -622,6 +622,194 @@ if ( $sur ) {
 	t_eq( 50.0, (float) $sur[0]->get_total(), 'surcharge = 50 gross' );
 	t_eq( 6.52, (float) $sur[0]->get_total_tax(), 'surcharge VAT at 15% (50 gross -> 6.52)' );
 }
+
+
+// ---------- Fixes from the verification passes ----------
+echo "\n[Verify] Unpaid orders keep reducing stock at payment\n";
+$P1 = make_product( 'Ubetalt-A', '100', 50 );
+$P2 = make_product( 'Ubetalt-B', '100', 50 );
+$P3 = make_product( 'Ubetalt-alt', '100', 50 );
+$o = wc_create_order();
+$o->set_billing_email( 'kunde@example.com' ); $o->set_billing_country( 'NO' );
+$o->add_product( wc_get_product( $P1->get_id() ), 3 );
+$o->add_product( wc_get_product( $P2->get_id() ), 1 );
+$o->calculate_totals( true ); $o->set_status( 'pending' ); $o->save();
+$ids = array_keys( wc_get_order( $o->get_id() )->get_items() );
+admin_save( wc_get_order( $o->get_id() ), array( $ids[0] => array( 'missing' => '1', 'qty_missing' => '1', 'alternatives' => array( $P3->get_id() ) ) ) );
+$item = wc_get_order( $o->get_id() )->get_item( $ids[0], false );
+$data = call( 'get_item_data', $item ); $data['status'] = 'alt_pending'; $data['selected_alt_id'] = $P3->get_id(); $data['qty_alt'] = 1;
+$item->update_meta_data( '_lp_missing_data', $data ); $item->save();
+apply_via_handler( $o->get_id(), $ids[0], 'alternative', 'replace' );
+t_eq( 50, wc_get_product( $P2->get_id() )->get_stock_quantity(), 'unpaid order: untouched line not reduced yet' );
+wc_get_order( $o->get_id() )->payment_complete();
+t_eq( 49, wc_get_product( $P2->get_id() )->get_stock_quantity(), 'payment reduces stock for the untouched line' );
+t_eq( 48, wc_get_product( $P1->get_id() )->get_stock_quantity(), 'payment reduces the shrunk line by its new quantity (2)' );
+t_eq( 49, wc_get_product( $P3->get_id() )->get_stock_quantity(), 'payment reduces the alternative line' );
+
+echo "\n[Verify] No rounding drift\n";
+$R = make_product( 'Pris 99,99', '99.99' );
+$R2 = make_product( 'Pris 99,99 alt', '99.99' );
+$o = make_order( $R, 3 );
+$iid = first_item_id( $o );
+t_eq( 299.97, (float) $o->get_total(), '3 x 99.99 = 299.97' );
+admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1', 'alternatives' => array( $R2->get_id() ) ) ) );
+$item = wc_get_order( $o->get_id() )->get_item( $iid, false );
+$data = call( 'get_item_data', $item ); $data['status'] = 'alt_pending'; $data['selected_alt_id'] = $R2->get_id(); $data['qty_alt'] = 1;
+$item->update_meta_data( '_lp_missing_data', $data ); $item->save();
+apply_via_handler( $o->get_id(), $iid, 'alternative', 'replace' );
+$o = wc_get_order( $o->get_id() );
+t_eq( 299.97, (float) $o->get_total(), 'same-priced swap keeps 299.97' );
+t_eq( 59.99, (float) $o->get_total_tax(), 'same-priced swap keeps VAT 59.99' );
+$o = make_order( $R, 3 );
+$iid = first_item_id( $o );
+admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1', 'propose_delete' => '1' ) ) );
+$item = wc_get_order( $o->get_id() )->get_item( $iid, false );
+$data = call( 'get_item_data', $item ); $data['status'] = 'delete_pending';
+$item->update_meta_data( '_lp_missing_data', $data ); $item->save();
+apply_via_handler( $o->get_id(), $iid, 'delete', 'reduce' );
+t_eq( 199.98, (float) wc_get_order( $o->get_id() )->get_total(), 'reduce 1 of 3 x 99.99 = 199.98' );
+update_option( 'woocommerce_price_num_decimals', 0 );
+$Z = make_product( 'Pris 99 kr', '99' );
+$o = make_order( $Z, 3 );
+$iid = first_item_id( $o );
+t_eq( 297.0, (float) $o->get_total(), '0 decimals: 3 x 99 = 297' );
+admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1', 'propose_delete' => '1' ) ) );
+$item = wc_get_order( $o->get_id() )->get_item( $iid, false );
+$data = call( 'get_item_data', $item ); $data['status'] = 'delete_pending';
+$item->update_meta_data( '_lp_missing_data', $data ); $item->save();
+apply_via_handler( $o->get_id(), $iid, 'delete', 'reduce' );
+t_eq( 198.0, (float) wc_get_order( $o->get_id() )->get_total(), '0 decimals: reduce 1 of 3 x 99 = 198' );
+update_option( 'woocommerce_price_num_decimals', 2 );
+
+echo "\n[Verify] Refunded units are not refunded again\n";
+$o = make_order( $A, 5 );
+$iid = first_item_id( $o );
+$line = wc_get_order( $o->get_id() )->get_item( $iid, false );
+$taxes = $line->get_taxes()['total'];
+$rate = key( $taxes );
+wc_create_refund( array( 'amount' => 200, 'order_id' => $o->get_id(), 'line_items' => array( $iid => array( 'qty' => 2, 'refund_total' => 160, 'refund_tax' => array( $rate => 40 ) ) ) ) );
+admin_save( wc_get_order( $o->get_id() ), array( $iid => array( 'missing' => '1', 'qty_missing' => '0', 'propose_delete' => '1' ) ) );
+t_eq( 3, item_data( $o->get_id(), $iid )['qty_missing'], 'missing qty defaults to the 3 units not refunded' );
+$item = wc_get_order( $o->get_id() )->get_item( $iid, false );
+$data = call( 'get_item_data', $item ); $data['status'] = 'delete_pending';
+$item->update_meta_data( '_lp_missing_data', $data ); $item->save();
+apply_via_handler( $o->get_id(), $iid, 'delete', 'refund' );
+t_eq( 500.0, (float) wc_get_order( $o->get_id() )->get_total_refunded(), 'total refunded is the line value (500), not 700' );
+
+echo "\n[Verify] Escalation without a working reminder email\n";
+update_option( 'woocommerce_lp_missing_customer_reminder_settings', array( 'enabled' => 'no' ) );
+$o = make_order( $A, 1 );
+$iid = first_item_id( $o );
+admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1' ) ) );
+$item = wc_get_order( $o->get_id() )->get_item( $iid, false );
+$data = call( 'get_item_data', $item ); $data['first_missing_at'] = time() - 30 * DAY_IN_SECONDS;
+$item->update_meta_data( '_lp_missing_data', $data ); $item->save();
+call( 'handle_scheduled_reminder', $o->get_id(), $iid );
+t_ok( item_data( $o->get_id(), $iid )['needs_attention'], 'old unanswered line escalates although the reminder is disabled' );
+update_option( 'woocommerce_lp_missing_customer_reminder_settings', array( 'enabled' => 'yes' ) );
+
+echo "\n[Verify] Tax address and tax status\n";
+$o = wc_create_order();
+$o->set_billing_email( 'kunde@example.com' ); $o->set_billing_country( 'SE' ); $o->set_shipping_country( 'SE' );
+$o->add_product( wc_get_product( $A->get_id() ), 2 );
+$ship = new WC_Order_Item_Shipping(); $ship->set_method_id( 'local_pickup' ); $ship->set_method_title( 'Hent selv' ); $ship->set_total( 0 );
+$o->add_item( $ship );
+$o->calculate_totals( true ); $o->set_status( 'processing' ); $o->save();
+$o = wc_get_order( $o->get_id() );
+t_eq( 40.0, (float) $o->get_total_tax(), 'local pickup: WooCommerce taxes at the shop base (25%)' );
+$iid = first_item_id( $o );
+t_eq( 20.0, call( 'get_product_unit_prices_for_order', $o, wc_get_product( $A->get_id() ) )['incl'] - call( 'get_product_unit_prices_for_order', $o, wc_get_product( $A->get_id() ) )['excl'], 'local pickup: alternative priced with base VAT (20 of 100)' );
+$FF = wc_get_product( $F->get_id() );
+admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1', 'alternatives' => array( $FF->get_id() ) ) ) );
+$item = wc_get_order( $o->get_id() )->get_item( $iid, false );
+$data = call( 'get_item_data', $item ); $data['status'] = 'alt_pending'; $data['selected_alt_id'] = $FF->get_id(); $data['qty_alt'] = 1;
+$item->update_meta_data( '_lp_missing_data', $data ); $item->save();
+apply_via_handler( $o->get_id(), $iid, 'alternative', 'replace' );
+$o = wc_get_order( $o->get_id() );
+$alt = null; foreach ( $o->get_items() as $it ) { if ( $it->get_product_id() === $FF->get_id() ) { $alt = $it; } }
+t_eq( 13.04, (float) $alt->get_total_tax(), 'local pickup: 15% alternative keeps VAT (13.04 of 100)' );
+$N = make_product( 'Gavekort', '100' ); $N->set_tax_status( 'none' ); $N->save();
+$o = make_order( $A, 2 );
+$iid = first_item_id( $o );
+admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1', 'alternatives' => array( $N->get_id() ) ) ) );
+$item = wc_get_order( $o->get_id() )->get_item( $iid, false );
+$data = call( 'get_item_data', $item ); $data['status'] = 'alt_pending'; $data['selected_alt_id'] = $N->get_id(); $data['qty_alt'] = 1;
+$item->update_meta_data( '_lp_missing_data', $data ); $item->save();
+apply_via_handler( $o->get_id(), $iid, 'alternative', 'replace' );
+$o = wc_get_order( $o->get_id() );
+$alt = null; foreach ( $o->get_items() as $it ) { if ( $it->get_product_id() === $N->get_id() ) { $alt = $it; } }
+t_eq( 0.0, (float) $alt->get_total_tax(), 'non-taxable alternative carries no VAT' );
+t_eq( 100.0, (float) $alt->get_total(), 'non-taxable alternative keeps the 100 gross as net' );
+t_eq( 200.0, (float) $o->get_total(), 'order total unchanged' );
+
+echo "\n[Verify] Locks and flags when lines/orders leave the flow\n";
+$L = make_product( 'Laas', '100', 50 );
+$o = wc_create_order();
+$o->set_billing_email( 'kunde@example.com' ); $o->set_billing_country( 'NO' );
+$o->add_product( wc_get_product( $L->get_id() ), 2 );
+$o->calculate_totals( true ); $o->set_status( 'pending' ); $o->save();
+$iid = first_item_id( $o );
+admin_save( wc_get_order( $o->get_id() ), array( $iid => array( 'missing' => '1', 'qty_missing' => '2' ) ) );
+t_eq( 48, wc_get_product( $L->get_id() )->get_stock_quantity(), 'lock taken on an unpaid order' );
+wc_get_order( $o->get_id() )->update_status( 'failed' );
+t_eq( 50, wc_get_product( $L->get_id() )->get_stock_quantity(), 'failed payment releases the lock' );
+t_eq( 'cleared', item_data( $o->get_id(), $iid )['status'], 'failed payment closes the case' );
+$o = make_order( $A, 1 );
+$o->add_product( wc_get_product( $C->get_id() ), 1 ); $o->calculate_totals( true );
+$ids = array_keys( wc_get_order( $o->get_id() )->get_items() );
+admin_save( wc_get_order( $o->get_id() ), array( $ids[0] => array( 'missing' => '1', 'qty_missing' => '1' ) ) );
+t_eq( 'yes', wc_get_order( $o->get_id() )->get_meta( '_lp_missing_has_open' ), 'order open' );
+wc_delete_order_item( $ids[0] );
+t_eq( '', wc_get_order( $o->get_id() )->get_meta( '_lp_missing_has_open' ), 'deleting the missing line in the editor clears the open flag' );
+$o = make_order( $L, 2 );
+$iid = first_item_id( $o );
+$base = wc_get_product( $L->get_id() )->get_stock_quantity();
+admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '2' ) ) );
+t_eq( $base - 2, wc_get_product( $L->get_id() )->get_stock_quantity(), 'lock taken' );
+wc_get_order( $o->get_id() )->delete( true );
+t_eq( $base, wc_get_product( $L->get_id() )->get_stock_quantity(), 'permanently deleting the order releases the lock' );
+t_ok( ! wp_next_scheduled( 'lp_missing_send_reminder', array( $o->get_id(), $iid ) ) && ! ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( 'lp_missing_send_reminder', array( $o->get_id(), $iid ) ) ), 'deleted order has no reminder left' );
+
+echo "\n[Verify] Portal input and access\n";
+$o = make_order( $A, 1 );
+$iid = first_item_id( $o );
+admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1' ) ) );
+$html = portal_request( $o, array( 'lp_missing_verify_email' => array( 'x' ), 'lp_missing_verify_nonce' => 'x' ) );
+t_ok( is_string( $html ), 'array-valued email field is handled without a fatal error' );
+$u = wp_insert_user( array( 'user_login' => 'bidrag' . wp_rand( 1, 99999 ), 'user_pass' => 'x', 'user_email' => 'kunde@example.com', 'role' => 'contributor' ) );
+if ( ! is_wp_error( $u ) ) {
+	wp_set_current_user( $u );
+	$_GET = array(); $_POST = array();
+	$html = call( 'render_shortcode', array( 'order_id' => $o->get_id(), 'email' => 'kunde@example.com' ) );
+	t_ok( false !== strpos( $html, 'lp-missing-portal-error' ), 'matching account email alone does not grant attribute access' );
+}
+wp_set_current_user( 1 );
+
+echo "\n[Verify] One apply per order at a time\n";
+$o = make_order( $A, 2 );
+$o->add_product( wc_get_product( $C->get_id() ), 2 ); $o->calculate_totals( true );
+$ids = array_keys( wc_get_order( $o->get_id() )->get_items() );
+admin_save( wc_get_order( $o->get_id() ), array( $ids[1] => array( 'missing' => '1', 'qty_missing' => '1', 'propose_delete' => '1' ) ) );
+$item = wc_get_order( $o->get_id() )->get_item( $ids[1], false );
+$data = call( 'get_item_data', $item ); $data['status'] = 'delete_pending';
+$item->update_meta_data( '_lp_missing_data', $data ); $item->save();
+call( 'acquire_apply_lock', $o->get_id() );
+$redirect = apply_via_handler( $o->get_id(), $ids[1], 'delete', 'reduce' );
+t_ok( false !== strpos( $redirect, 'lp_missing_apply=error' ), 'apply on another line of a locked order is refused' );
+call( 'release_apply_lock', $o->get_id() );
+
+echo "\n[Verify] Upgrade repairs old open cases\n";
+$U = make_product( 'Uten lager', '100' ); $U->set_manage_stock( false ); $U->save();
+$o = make_order( $U, 4 );
+$iid = first_item_id( $o );
+$item = wc_get_order( $o->get_id() )->get_item( $iid, false );
+$item->update_meta_data( '_lp_missing_data', array( 'missing' => true, 'qty_missing' => 0, 'status' => 'pending', 'stock_locked_qty' => 2 ) );
+$item->save();
+$ord = wc_get_order( $o->get_id() ); $ord->update_meta_data( '_lp_missing_has_data', 'yes' ); $ord->save();
+call( 'upgrade_normalize_open_cases' );
+$d = item_data( $o->get_id(), $iid );
+t_eq( 4, $d['qty_missing'], 'old case with qty 0 gets the line quantity' );
+t_eq( 0, $d['stock_locked_qty'], 'phantom lock on an unmanaged product is dropped' );
 
 // ---------- Summary ----------
 echo "\nRESULT: {$GLOBALS['lp_pass']} passed, {$GLOBALS['lp_fail']} failed\n";

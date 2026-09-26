@@ -84,6 +84,19 @@ class LP_Missing_Line {
         return max( 1, absint( $item->get_quantity() ) - $moved );
     }
 
+    /**
+     * Units that can still be marked missing, replaced or removed: billable units minus units already refunded.
+     * (Pricing keeps using the billable quantity, because a refund does not change the line totals.)
+     */
+    public static function get_item_available_qty( $item ) {
+        $refunded = 0;
+        $order    = $item->get_order();
+        if ( $order instanceof WC_Order ) {
+            $refunded = absint( $order->get_qty_refunded_for_item( $item->get_id() ) );
+        }
+        return max( 0, self::get_item_billable_qty( $item ) - $refunded );
+    }
+
     public static function is_line_resolved( $data ) {
         $resolved_statuses = array( 'alt_applied', 'delete_applied', 'cleared' );
         return empty( $data['missing'] ) || in_array( $data['status'], $resolved_statuses, true );

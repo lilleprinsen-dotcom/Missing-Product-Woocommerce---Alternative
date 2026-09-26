@@ -70,7 +70,7 @@ class LP_Missing_Admin_Metabox {
             echo '</div>';
 
             echo '<div style="margin-top:8px;">';
-            echo '<label>' . esc_html__( 'Quantity missing', 'lp-missing' ) . ': <input type="number" min="0" max="' . esc_attr( LP_Missing_Line::get_item_billable_qty( $item ) ) . '" name="lp_missing_items[' . absint( $item_id ) . '][qty_missing]" value="' . esc_attr( $data['qty_missing'] ) . '" style="width:80px;" /></label>';
+            echo '<label>' . esc_html__( 'Quantity missing', 'lp-missing' ) . ': <input type="number" min="0" max="' . esc_attr( LP_Missing_Line::get_item_available_qty( $item ) ) . '" name="lp_missing_items[' . absint( $item_id ) . '][qty_missing]" value="' . esc_attr( $data['qty_missing'] ) . '" style="width:80px;" /></label>';
             echo ' <span class="description">' . esc_html__( 'Leave at 0 to use the full line quantity.', 'lp-missing' ) . '</span>';
             echo '</div>';
 
@@ -284,8 +284,8 @@ JS;
             $internal_notes = isset( $posted['internal_notes'] ) ? wp_kses_post( wp_unslash( $posted['internal_notes'] ) ) : '';
             $alt_ids = isset( $posted['alternatives'] ) ? LP_Missing_Util::sanitize_alt_ids( wp_unslash( $posted['alternatives'] ) ) : array();
 
-            // A missing line always needs a usable quantity: default to (and cap at) the billable line quantity.
-            $billable_qty = LP_Missing_Line::get_item_billable_qty( $item );
+            // A missing line always needs a usable quantity: default to (and cap at) the units not yet refunded.
+            $billable_qty = max( 1, LP_Missing_Line::get_item_available_qty( $item ) );
             if ( $missing ) {
                 $qty_missing = $qty_missing < 1 ? $billable_qty : min( $qty_missing, $billable_qty );
             }

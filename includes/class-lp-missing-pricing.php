@@ -26,29 +26,39 @@ class LP_Missing_Pricing {
         $qty      = max( 0, min( absint( $qty ), $billable ) );
         $ratio    = $billable > 0 ? $qty / $billable : 0;
         $taxes    = $item->get_taxes();
+        // Net amounts are kept unrounded like WooCommerce stores them, so splitting never drifts.
         $share    = array(
             'qty'      => $qty,
-            'subtotal' => wc_format_decimal( (float) $item->get_subtotal() * $ratio, wc_get_price_decimals() ),
-            'total'    => wc_format_decimal( (float) $item->get_total() * $ratio, wc_get_price_decimals() ),
+            'subtotal' => wc_format_decimal( (float) $item->get_subtotal() * $ratio ),
+            'total'    => wc_format_decimal( (float) $item->get_total() * $ratio ),
             'taxes'    => array(
                 'total'    => array(),
                 'subtotal' => array(),
             ),
         );
+        $round_per_line = 'yes' !== get_option( 'woocommerce_tax_round_at_subtotal' );
         foreach ( array( 'total', 'subtotal' ) as $type ) {
             if ( empty( $taxes[ $type ] ) || ! is_array( $taxes[ $type ] ) ) {
                 continue;
             }
             foreach ( $taxes[ $type ] as $rate_id => $amount ) {
-                $share['taxes'][ $type ][ $rate_id ] = wc_format_decimal( (float) $amount * $ratio );
+                $amount = (float) $amount;
+                if ( $round_per_line ) {
+                    // Line taxes are rounded per line: give the remaining units the tax a fresh line of that size would
+                    // have, and the moved share the rest, so both rounded lines add up to the original rounded tax.
+                    $share_tax = wc_round_tax_total( $amount ) - wc_round_tax_total( $amount * ( 1 - $ratio ) );
+                } else {
+                    $share_tax = $amount * $ratio;
+                }
+                $share['taxes'][ $type ][ $rate_id ] = wc_format_decimal( $share_tax );
             }
         }
         return $share;
     }
 
     public static function subtract_share_from_item( $item, $share ) {
-        $item->set_subtotal( wc_format_decimal( max( 0, (float) $item->get_subtotal() - (float) $share['subtotal'] ), wc_get_price_decimals() ) );
-        $item->set_total( wc_format_decimal( max( 0, (float) $item->get_total() - (float) $share['total'] ), wc_get_price_decimals() ) );
+        $item->set_subtotal( wc_format_decimal( max( 0, (float) $item->get_subtotal() - (float) $share['subtotal'] ) ) );
+        $item->set_total( wc_format_decimal( max( 0, (float) $item->get_total() - (float) $share['total'] ) ) );
 
         $taxes = $item->get_taxes();
         if ( empty( $taxes['total'] ) ) {
@@ -83,26 +93,43 @@ class LP_Missing_Pricing {
     /**
      * The address WooCommerce taxes this order on (per the "Calculate tax based on" setting).
      */
+    /**
+     * The address WooCommerce taxes this order on. Mirrors WC_Abstract_Order::get_tax_location() (which is protected):
+     * "Calculate tax based on" setting, local pickup taxed at the shop base, and the same filter.
+     */
     public static function get_order_tax_location( $order ) {
         $based_on = get_option( 'woocommerce_tax_based_on', 'billing' );
         if ( 'shipping' === $based_on && ! $order->get_shipping_country() ) {
             $based_on = 'billing';
         }
-        if ( 'base' === $based_on || ( 'billing' === $based_on && ! $order->get_billing_country() ) ) {
-            return array(
+        $type = 'billing' === $based_on ? 'billing' : 'shipping';
+        $args = array(
+            'country'  => $order->{"get_{$type}_country"}(),
+            'state'    => $order->{"get_{$type}_state"}(),
+            'postcode' => $order->{"get_{$type}_postcode"}(),
+            'city'     => $order->{"get_{$type}_city"}(),
+        );
+
+        $apply_base_tax       = true === apply_filters( 'woocommerce_apply_base_tax_for_local_pickup', true );
+        $local_pickup_methods = apply_filters( 'woocommerce_local_pickup_methods', array( 'legacy_local_pickup', 'local_pickup' ) );
+        $shipping_method_ids  = array();
+        foreach ( $order->get_shipping_methods() as $shipping ) {
+            $shipping_method_ids[] = $shipping->get_method_id();
+        }
+        if ( $apply_base_tax && array_intersect( $shipping_method_ids, (array) $local_pickup_methods ) ) {
+            $based_on = 'base';
+        }
+
+        if ( 'base' === $based_on || empty( $args['country'] ) ) {
+            $args = array(
                 'country'  => WC()->countries->get_base_country(),
                 'state'    => WC()->countries->get_base_state(),
                 'postcode' => WC()->countries->get_base_postcode(),
                 'city'     => WC()->countries->get_base_city(),
             );
         }
-        $type = 'shipping' === $based_on ? 'shipping' : 'billing';
-        return array(
-            'country'  => $order->{"get_{$type}_country"}(),
-            'state'    => $order->{"get_{$type}_state"}(),
-            'postcode' => $order->{"get_{$type}_postcode"}(),
-            'city'     => $order->{"get_{$type}_city"}(),
-        );
+
+        return apply_filters( 'woocommerce_order_get_tax_location', $args, $order );
     }
 
     /**
@@ -190,7 +217,8 @@ class LP_Missing_Pricing {
         $data          = LP_Missing_Line::get_item_data( $item );
         $preview_data  = $data;
         $preview_data['selected_alt_id'] = $alt_product->get_id();
-        $snapshot      = self::get_frozen_pricing_snapshot( $order, $item, $preview_data, $alt_product, $qty );
+        // A frozen snapshot may be for another quantity than the one shown: scale it.
+        $snapshot      = self::scale_pricing_snapshot( self::get_frozen_pricing_snapshot( $order, $item, $preview_data, $alt_product, $qty ), $qty );
         $delta_unit    = floatval( $snapshot['delta_per_unit_incl'] );
         $delta_total   = floatval( $snapshot['delta_total_incl'] );
 
@@ -244,7 +272,7 @@ class LP_Missing_Pricing {
     }
 
     public static function order_is_vat_exempt( $order ) {
-        return 'yes' === $order->get_meta( 'is_vat_exempt', true );
+        return (bool) apply_filters( 'woocommerce_order_is_vat_exempt', 'yes' === $order->get_meta( 'is_vat_exempt', true ), $order );
     }
 
     public static function get_order_tax_rates( $order, $tax_class ) {
@@ -262,23 +290,37 @@ class LP_Missing_Pricing {
         if ( ! $rates ) {
             return array();
         }
-        return array_map( 'wc_format_decimal', WC_Tax::calc_tax( (float) $gross, $rates, true ) );
+        $taxes = WC_Tax::calc_tax( (float) $gross, $rates, true );
+        if ( 'yes' !== get_option( 'woocommerce_tax_round_at_subtotal' ) ) {
+            $taxes = array_map( 'wc_round_tax_total', $taxes );
+        }
+        return array_map( 'wc_format_decimal', $taxes );
     }
 
     /**
      * Keep the gross (what the customer paid) of a moved line share, but re-split net/VAT for another tax class
      * (e.g. 25% goods replaced by a 15% food item).
      */
-    public static function rebase_share_to_tax_class( $order, $share, $tax_class ) {
-        if ( empty( $share['taxes']['total'] ) ) {
-            return $share; // Untaxed line (tax off, exempt or export): nothing to re-split.
-        }
+    /**
+     * Keep the gross (what the customer paid) of a moved line share, but re-split net/VAT for the alternative's own
+     * tax status and class (e.g. 25% goods replaced by a 15% food item, or a non-taxable gift card).
+     */
+    public static function rebase_share_to_tax_class( $order, $share, $tax_class, $taxable = true ) {
         foreach ( array( 'total', 'subtotal' ) as $type ) {
             $gross = (float) $share[ $type ] + array_sum( array_map( 'floatval', $share['taxes'][ $type ] ) );
-            $taxes = self::split_gross_by_tax_class( $order, $gross, $tax_class );
-            $share[ $type ]          = wc_format_decimal( $gross - array_sum( $taxes ), wc_get_price_decimals() );
+            $taxes = $taxable ? self::split_gross_by_tax_class( $order, $gross, $tax_class ) : array();
+            // Net = gross minus the (rounded) taxes, so the line's gross stays exactly what was paid.
+            $share[ $type ]          = wc_format_decimal( $gross - array_sum( array_map( 'floatval', $taxes ) ) );
             $share['taxes'][ $type ] = $taxes;
         }
         return $share;
+    }
+
+    /**
+     * Whether an alternative must be re-taxed instead of inheriting the original line's taxes.
+     */
+    public static function needs_tax_rebase( $item, $alt_product ) {
+        $original_taxable = 'taxable' === $item->get_tax_status();
+        return $alt_product->get_tax_class() !== $item->get_tax_class() || $alt_product->is_taxable() !== $original_taxable;
     }
 }

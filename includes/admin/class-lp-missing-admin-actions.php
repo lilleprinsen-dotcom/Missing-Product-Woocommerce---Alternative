@@ -59,8 +59,9 @@ class LP_Missing_Admin_Actions {
         $apply_mode = isset( $_REQUEST['apply_mode'] ) ? sanitize_key( wp_unslash( $_REQUEST['apply_mode'] ) ) : '';
         $result     = array( 'status' => 'error', 'message' => __( 'Unknown action.', 'lp-missing' ) );
 
-        // One apply per line at a time: a double click must not add the alternative or create a surcharge twice.
-        if ( ! self::acquire_apply_lock( $item_id ) ) {
+        // One apply per order at a time: a double click (or two tabs) must not add an alternative or a surcharge twice,
+        // or recalculate totals from a stale copy of the order.
+        if ( ! self::acquire_apply_lock( $order_id ) ) {
             $result = array( 'status' => 'error', 'message' => __( 'This decision is already being applied. Reload the order in a moment.', 'lp-missing' ) );
         } else {
             try {
@@ -75,7 +76,7 @@ class LP_Missing_Admin_Actions {
                     $result = LP_Missing_Apply_Service::apply_delete_decision( $order, $item, $item_id, LP_Missing_Line::get_item_data( $item ), 'refund' === $apply_mode ? 'refund' : 'reduce' );
                 }
             } finally {
-                self::release_apply_lock( $item_id );
+                self::release_apply_lock( $order_id );
             }
         }
 
@@ -85,9 +86,9 @@ class LP_Missing_Admin_Actions {
         exit;
     }
 
-    public static function acquire_apply_lock( $item_id ) {
+    public static function acquire_apply_lock( $order_id ) {
         global $wpdb;
-        $name     = 'lp_missing_applying_' . absint( $item_id );
+        $name     = 'lp_missing_applying_' . absint( $order_id );
         $existing = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
         if ( null !== $existing && (int) $existing < time() - 2 * MINUTE_IN_SECONDS ) {
             // Stale lock left by a request that died.
@@ -98,9 +99,9 @@ class LP_Missing_Admin_Actions {
         return 1 === (int) $inserted;
     }
 
-    public static function release_apply_lock( $item_id ) {
+    public static function release_apply_lock( $order_id ) {
         global $wpdb;
-        $wpdb->delete( $wpdb->options, array( 'option_name' => 'lp_missing_applying_' . absint( $item_id ) ) );
+        $wpdb->delete( $wpdb->options, array( 'option_name' => 'lp_missing_applying_' . absint( $order_id ) ) );
     }
 
     public static function admin_notices() {

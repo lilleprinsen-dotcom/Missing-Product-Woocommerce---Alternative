@@ -61,7 +61,9 @@ class LP_Missing_Plugin {
      * version is lower than the step's version.
      */
     public static function upgrades() {
-        $steps = array();
+        $steps = array(
+            '1.2.0' => array( 'LP_Missing_Orders', 'upgrade_normalize_open_cases' ),
+        );
         /**
          * Filter the upgrade steps.
          *

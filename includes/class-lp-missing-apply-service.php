@@ -20,7 +20,10 @@ class LP_Missing_Apply_Service {
             return array( 'status' => 'error', 'message' => __( 'Selected alternative is no longer available.', 'lp-missing' ) );
         }
 
-        $billable_qty         = LP_Missing_Line::get_item_billable_qty( $item );
+        $billable_qty         = LP_Missing_Line::get_item_available_qty( $item );
+        if ( $billable_qty < 1 ) {
+            return array( 'status' => 'error', 'message' => __( 'All units on this line have already been refunded.', 'lp-missing' ) );
+        }
         $previous_missing_qty = absint( $data['qty_missing'] );
         $qty_alt = $data['qty_alt'] ? absint( $data['qty_alt'] ) : $previous_missing_qty;
         $qty_alt = max( 1, min( $qty_alt, max( 1, $previous_missing_qty ), $billable_qty ) );
@@ -52,8 +55,8 @@ class LP_Missing_Apply_Service {
         }
 
         $alt_share = $share;
-        if ( $alt_product->get_tax_class() !== $item->get_tax_class() ) {
-            $alt_share = LP_Missing_Pricing::rebase_share_to_tax_class( $order, $share, $alt_product->get_tax_class() );
+        if ( LP_Missing_Pricing::needs_tax_rebase( $item, $alt_product ) ) {
+            $alt_share = LP_Missing_Pricing::rebase_share_to_tax_class( $order, $share, $alt_product->get_tax_class(), $alt_product->is_taxable() );
         }
         $alt_item_id = $order->add_product(
             $alt_product,
@@ -104,13 +107,10 @@ class LP_Missing_Apply_Service {
         $item->update_meta_data( LP_Missing_Plugin::META_KEY, $new_data );
         $item->save();
         if ( 'replace' === $mode ) {
-            // Same stock bookkeeping WooCommerce does when staff change a line quantity (keeps _reduced_stock in sync).
-            LP_Missing_Stock::adjust_line_item_stock( $order, $item, $new_qty );
+            LP_Missing_Stock::shrink_line_reduced_stock( $order, $item, $new_qty );
         }
         if ( $alt_item ) {
-            // Reduces stock for the alternative (for paid/processing orders) and records _reduced_stock,
-            // so WooCommerce restores it if the order is later cancelled or refunded.
-            LP_Missing_Stock::adjust_line_item_stock( $order, $alt_item, $qty_alt );
+            LP_Missing_Stock::reduce_stock_for_added_line( $order, $alt_item );
         }
         if ( 'replace' === $mode && $new_qty < 1 ) {
             $order->remove_item( $item_id );
@@ -146,7 +146,10 @@ class LP_Missing_Apply_Service {
             return array( 'status' => 'error', 'message' => __( 'No customer-approved deletion to apply.', 'lp-missing' ) );
         }
 
-        $billable_qty         = LP_Missing_Line::get_item_billable_qty( $item );
+        $billable_qty         = LP_Missing_Line::get_item_available_qty( $item );
+        if ( $billable_qty < 1 ) {
+            return array( 'status' => 'error', 'message' => __( 'All units on this line have already been refunded.', 'lp-missing' ) );
+        }
         $previous_missing_qty = absint( $data['qty_missing'] );
         $qty_remove = $previous_missing_qty ? $previous_missing_qty : $billable_qty;
         $qty_remove = max( 1, min( $qty_remove, $billable_qty ) );
@@ -210,7 +213,7 @@ class LP_Missing_Apply_Service {
         $item->update_meta_data( LP_Missing_Plugin::META_KEY, $new_data );
         $item->save();
         if ( 'reduce' === $mode ) {
-            LP_Missing_Stock::adjust_line_item_stock( $order, $item, $new_qty );
+            LP_Missing_Stock::shrink_line_reduced_stock( $order, $item, $new_qty );
             if ( $new_qty < 1 ) {
                 $order->remove_item( $item_id );
             }
@@ -274,7 +277,7 @@ class LP_Missing_Apply_Service {
         $fee->set_name( sprintf( __( 'Mellomlegg for alternativ vare på ordre #%s', 'lp-missing' ), $order->get_order_number() ) );
         // The customer was quoted the gross (incl. VAT) delta; split it with the alternative's tax rates for this order,
         // so the invoice total equals the frozen portal price and the VAT lands on real tax rates.
-        $taxes      = LP_Missing_Pricing::split_gross_by_tax_class( $order, $difference, $alt_product->get_tax_class() );
+        $taxes      = $alt_product->is_taxable() ? LP_Missing_Pricing::split_gross_by_tax_class( $order, $difference, $alt_product->get_tax_class() ) : array();
         $delta_excl = wc_format_decimal( (float) $difference - array_sum( $taxes ), wc_get_price_decimals() );
         $fee->set_tax_class( $alt_product->get_tax_class() );
         $fee->set_tax_status( $taxes ? 'taxable' : 'none' );

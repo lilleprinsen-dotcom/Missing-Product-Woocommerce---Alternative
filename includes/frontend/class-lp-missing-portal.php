@@ -30,7 +30,8 @@ class LP_Missing_Portal {
         }
         // Attributes are written by whoever edits the page: only staff or the order's own customer may act through them.
         $user = wp_get_current_user();
-        $is_owner = $user && $user->exists() && ( ( $order->get_customer_id() && $order->get_customer_id() === $user->ID ) || strtolower( $user->user_email ) === strtolower( $order->get_billing_email() ) );
+        // Account emails can be changed without confirmation, so ownership is the order's customer ID only.
+        $is_owner = $user && $user->exists() && $order->get_customer_id() && $order->get_customer_id() === $user->ID;
         if ( ! $is_owner && ! current_user_can( 'edit_shop_orders' ) ) {
             return array( null, '' );
         }
@@ -76,7 +77,7 @@ class LP_Missing_Portal {
                 $error = __( 'Sikkerhetssjekk feilet. Prøv igjen.', 'lp-missing' );
                 return false;
             }
-            $submitted = sanitize_email( wp_unslash( $_POST['lp_missing_verify_email'] ) );
+            $submitted = is_string( $_POST['lp_missing_verify_email'] ) ? sanitize_email( wp_unslash( $_POST['lp_missing_verify_email'] ) ) : '';
             if ( $submitted && strtolower( $submitted ) === strtolower( $billing_email ) ) {
                 return true;
             }

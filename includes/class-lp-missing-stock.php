@@ -13,26 +13,56 @@ class LP_Missing_Stock {
     public static function register() {
         // Release stock locks and stop reminders when a line/order leaves the flow outside this plugin.
         add_action( 'woocommerce_before_delete_order_item', array( __CLASS__, 'handle_order_item_deleted' ) );
+        add_action( 'woocommerce_delete_order_item', array( __CLASS__, 'handle_order_item_after_delete' ) );
         add_action( 'woocommerce_order_status_cancelled', array( __CLASS__, 'handle_order_closed' ), 10, 2 );
         add_action( 'woocommerce_order_status_refunded', array( __CLASS__, 'handle_order_closed' ), 10, 2 );
-        add_action( 'woocommerce_before_delete_order', array( __CLASS__, 'handle_order_closed' ), 10, 2 );
+        add_action( 'woocommerce_order_status_failed', array( __CLASS__, 'handle_order_closed' ), 10, 2 );
+        // Fires before the order's items are deleted, for both storages (a permanently deleted order).
+        add_action( 'woocommerce_delete_order_items', array( __CLASS__, 'handle_order_closed' ) );
+    }
+
+    /*
+     * Stock model: units confirmed missing never come back into stock. The order's own stock reduction already
+     * covers them; the missing-item lock only holds them apart while the case is open and is released when the case
+     * is resolved. So when the plugin shrinks a line, only its _reduced_stock record follows the new quantity
+     * (no restock), which also keeps WooCommerce's own stock sync on a later order "Update" from restocking them.
+     */
+
+    public static function order_stock_reduced( $order ) {
+        return $order instanceof WC_Order && (bool) $order->get_data_store()->get_stock_reduced( $order->get_id() );
+    }
+
+    public static function shrink_line_reduced_stock( $order, $item, $quantity ) {
+        if ( ! self::order_stock_reduced( $order ) || '' === $item->get_meta( '_reduced_stock', true ) ) {
+            return;
+        }
+        $reduced = wc_stock_amount( $item->get_meta( '_reduced_stock', true ) );
+        $new     = min( $reduced, max( 0, absint( $quantity ) ) );
+        if ( $new !== $reduced ) {
+            $item->update_meta_data( '_reduced_stock', $new );
+            $item->save();
+        }
     }
 
     /**
-     * Sync a line's stock reduction with its (new) quantity the way WooCommerce does for edits in the order screen.
-     * Only acts for orders whose stock WooCommerce has reduced (processing, on-hold, completed).
+     * Take stock for a line the plugin added (the alternative) the way WooCommerce does for lines added to an order
+     * whose stock is already reduced, recording _reduced_stock so a cancellation restores it. Orders that have not
+     * reduced stock yet (unpaid) reduce it for all lines at payment instead.
      */
-    public static function adjust_line_item_stock( $order, $item, $quantity ) {
+    public static function reduce_stock_for_added_line( $order, $item ) {
+        if ( ! self::order_stock_reduced( $order ) ) {
+            return;
+        }
         if ( ! function_exists( 'wc_maybe_adjust_line_item_product_stock' ) && defined( 'WC_ABSPATH' ) ) {
             include_once WC_ABSPATH . 'includes/admin/wc-admin-functions.php';
         }
         if ( ! function_exists( 'wc_maybe_adjust_line_item_product_stock' ) ) {
             return;
         }
-        $change = wc_maybe_adjust_line_item_product_stock( $item, max( 0, absint( $quantity ) ) );
-        if ( $change && ! is_wp_error( $change ) && 'yes' === LP_Missing_Settings::get_settings()['enable_stock_notes'] ) {
+        $change = wc_maybe_adjust_line_item_product_stock( $item );
+        if ( $change && ! is_wp_error( $change ) && 'yes' === LP_Missing_Settings::get( 'enable_stock_notes' ) ) {
             $product = $item->get_product();
-            $order->add_order_note( sprintf( __( 'Adjusted stock for %1$s: %2$s &rarr; %3$s (line quantity %4$d).', 'lp-missing' ), $product ? $product->get_name() : $item->get_name(), $change['from'], $change['to'], absint( $quantity ) ) );
+            $order->add_order_note( sprintf( __( 'Adjusted stock for %1$s: %2$s &rarr; %3$s (line quantity %4$d).', 'lp-missing' ), $product ? $product->get_name() : $item->get_name(), $change['from'], $change['to'], $item->get_quantity() ) );
         }
     }
 
@@ -99,14 +129,29 @@ class LP_Missing_Stock {
         return true;
     }
 
+    /** @var array Order IDs whose flags must be refreshed once a deleted line is gone (item_id => order_id). */
+    protected static $deleted_item_orders = array();
+
     public static function handle_order_item_deleted( $item_id ) {
         $item = WC_Order_Factory::get_order_item( $item_id );
         if ( ! $item instanceof WC_Order_Item_Product ) {
             return;
         }
         $order = $item->get_order();
-        if ( $order instanceof WC_Order ) {
+        if ( $order instanceof WC_Order && $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
             self::release_item_lock( $item, $order );
+            self::$deleted_item_orders[ $item_id ] = $order->get_id();
+        }
+    }
+
+    public static function handle_order_item_after_delete( $item_id ) {
+        if ( empty( self::$deleted_item_orders[ $item_id ] ) ) {
+            return;
+        }
+        $order = wc_get_order( self::$deleted_item_orders[ $item_id ] );
+        unset( self::$deleted_item_orders[ $item_id ] );
+        if ( $order instanceof WC_Order ) {
+            LP_Missing_Orders::refresh_order_flags( $order );
         }
     }
 
