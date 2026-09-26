@@ -49,6 +49,7 @@ class LP_Missing_Plugin {
             'LP_Missing_Admin_Actions',
             'LP_Missing_Admin_Settings_Page',
             'LP_Missing_Admin_Orders_List',
+            'LP_Missing_Admin_Alternatives',
             'LP_Missing_Portal',
             'LP_Missing_Notifier',
             'LP_Missing_Lifecycle',
