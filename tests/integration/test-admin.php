@@ -1,6 +1,7 @@
 <?php
 // Admin screen tests: ready flag, order list views/column, history line, customer link tools, AJAX endpoints.
 // Run with: wp eval-file tests/integration/test-admin.php (see tests/README.md), with HPOS on and off.
+defined( 'ABSPATH' ) || exit; // Runs inside WordPress (wp eval-file), never over HTTP.
 require __DIR__ . '/bootstrap.php';
 
 $hpos = \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
@@ -641,8 +642,9 @@ $nb = function () {
 unload_textdomain( 'lp-missing' );
 add_filter( 'locale', $nb );
 add_filter( 'determine_locale', $nb );
-t_eq( 'Manglende varer', __( 'Missing / Problem Items', 'lp-missing' ), 'box title in Norwegian' );
-t_eq( '2 har svart – klare til å utføre', sprintf( _n( '%d answered – ready to apply', '%d answered – ready to apply', 2, 'lp-missing' ), 2 ), 'plural forms in Norwegian' );
+t_eq( 'Manglende varer', __( 'Missing items', 'lp-missing' ), 'box title in Norwegian' );
+t_eq( '2 har svart – kan utføres', sprintf( _n( '%d answered – ready to apply', '%d answered – ready to apply', 2, 'lp-missing' ), 2 ), 'plural forms in Norwegian' );
+t_ok( 0 === strpos( sprintf( _n( 'Completed while %1$d missing item was not settled. %2$s may charge the full amount: settle the item in the Missing items box, and a refund is then sent to the customer.', 'Completed while %1$d missing items were not settled. %2$s may charge the full amount: settle the items in the Missing items box, and refunds are then sent to the customer.', 2, 'lp-missing' ), 2, 'Dintero' ), 'Fullført mens 2 manglende varer ikke var avklart.' ), 'plural form picked for 2' );
 $box_nb = render_box( $ou );
 t_ok( false !== strpos( $box_nb, 'Hvor mange mangler?' ) && false !== strpos( $box_nb, 'Byttet med' ), 'the box is Norwegian' );
 remove_filter( 'locale', $nb );

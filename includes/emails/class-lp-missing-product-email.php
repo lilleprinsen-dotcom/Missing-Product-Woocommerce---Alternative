@@ -29,7 +29,7 @@ class LP_Missing_Product_Email extends LP_Missing_Email_Base {
     }
 
     public function get_default_subject() {
-        return __( 'Velg erstatning for {count} vare(r) i ordre #{order_number}', 'lp-missing' );
+        return __( 'Velg erstatning for det som mangler i ordre #{order_number}', 'lp-missing' );
     }
 
     public function get_default_heading() {

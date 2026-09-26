@@ -150,7 +150,7 @@ const submit = (page, sel) => Promise.all([page.waitForNavigation(), page.click(
   ok(await link.count() === 1, 'apply link is present');
   await Promise.all([admin.waitForNavigation(), link.click()]);
   const notices = (await admin.locator('.notice').allInnerTexts()).join(' ');
-  ok(notices.includes('Customer decision applied'), 'apply link applies the decision: ' + notices.slice(0, 160));
+  ok(/Replaced 1 × E2E Bleier with E2E Bleier premium\./.test(notices), 'apply link applies the decision and says what it did: ' + notices.slice(0, 160));
   const status = await admin.locator('#lp_missing_metabox').innerText();
   ok(!status.includes('pending staff'), 'box no longer shows a pending decision');
 

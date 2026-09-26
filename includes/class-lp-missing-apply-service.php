@@ -13,6 +13,9 @@ class LP_Missing_Apply_Service {
     /** @var array|null Customer notes collected during an automatic run: one note per order instead of one per line. */
     protected static $note_buffer = null;
 
+    /** Order meta: customer notes waiting to be sent together. */
+    const PENDING_NOTES_META = '_lp_missing_pending_customer_notes';
+
     /**
      * Apply the customer's chosen alternative. $mode: 'replace' (shrink the original line) or 'add' (keep it).
      * $context: 'manual' (staff) or 'automatic'. Callers hold the per-order apply lock.
@@ -153,9 +156,20 @@ class LP_Missing_Apply_Service {
         if ( $alt_item ) {
             $alt_item->add_meta_data( '_lp_missing_alt_pricing_source', 'original_comparison_unit', true );
             $alt_item->add_meta_data( '_lp_missing_alt_original_item_id', absint( $item_id ), true );
+            $alt_item->add_meta_data( '_lp_missing_alt_original_product_id', absint( $item->get_variation_id() ? $item->get_variation_id() : $item->get_product_id() ), true );
             // Visible on order screens, emails, invoices and packing slips.
             $alt_item->add_meta_data( __( 'Erstatter', 'lp-missing' ), $original_name, true );
             $alt_item->save();
+            /**
+             * Fires after the replacement line was added to the order (before totals are recalculated).
+             *
+             * @param WC_Order_Item_Product $alt_item Replacement line.
+             * @param WC_Order_Item_Product $item     Original line.
+             * @param WC_Order              $order    Order.
+             * @param string                $mode     'replace' or 'add'.
+             * @param bool                  $whole    Whether the whole original line is replaced (and removed).
+             */
+            do_action( 'lp_missing_replacement_line_added', $alt_item, $item, $order, $mode, 'replace' === $mode && $new_qty < 1 );
         }
 
         $surcharge_result = self::handle_price_difference_surcharge( $order, $final_delta, $original_name, $alt_product, $qty_alt, $pricing_snapshot, $price_handling_mode );
@@ -186,6 +200,8 @@ class LP_Missing_Apply_Service {
         $item->save();
         if ( 'replace' === $mode ) {
             LP_Missing_Stock::shrink_line_reduced_stock( $order, $item, $new_qty );
+        } else {
+            LP_Missing_Stock::sync_moved_units( $order, $item );
         }
         if ( $alt_item ) {
             LP_Missing_Stock::reduce_stock_for_added_line( $order, $alt_item );
@@ -220,7 +236,16 @@ class LP_Missing_Apply_Service {
 
         return array(
             'status'             => 'success',
-            'message'            => $fully_resolved ? __( 'Alternative applied to the order.', 'lp-missing' ) : __( 'Alternative partially applied. Remaining missing quantity is still open.', 'lp-missing' ),
+            'message'            => implode( ' ', array_filter( array(
+                'replace' === $mode
+                    /* translators: 1: quantity, 2: ordered product, 3: replacement product */
+                    ? sprintf( __( 'Replaced %1$d × %2$s with %3$s.', 'lp-missing' ), $qty_alt, $original_name, $alt_product->get_name() )
+                    /* translators: 1: quantity, 2: replacement product */
+                    : sprintf( __( 'Added %1$d × %2$s as a separate line.', 'lp-missing' ), $qty_alt, $alt_product->get_name() ),
+                ! empty( $surcharge_result['surcharge_order_id'] ) ? $surcharge_result['summary_note'] : '',
+                /* translators: %d: quantity */
+                $fully_resolved ? '' : sprintf( __( '%d still waiting for the customer to choose.', 'lp-missing' ), $remaining_missing_qty ),
+            ) ) ),
             'qty'                => $qty_alt,
             'remaining'          => $remaining_missing_qty,
             'delta'              => $final_delta,
@@ -239,11 +264,18 @@ class LP_Missing_Apply_Service {
         if ( $billable_qty < 1 ) {
             return array( 'status' => 'error', 'message' => __( 'All units on this line have already been refunded.', 'lp-missing' ) );
         }
+        // The payment decides: before the money is charged only removal is right (a refund of money never taken would
+        // confuse the capture); once it is charged, taking it off the order total would overcharge the customer.
+        if ( 'reduce' === $mode && LP_Missing_Payment::CAPTURED === LP_Missing_Payment::get_state( $order ) ) {
+            return array( 'status' => 'error', 'message' => __( 'The payment has already been charged, so the item must be refunded. Reload the order and use the refund button.', 'lp-missing' ) );
+        }
+        $mode        = LP_Missing_Payment::get_removal_mode( $order, $mode );
+        $via_gateway = 'refund' === $mode && LP_Missing_Payment::refunds_through_gateway( $order );
         $previous_missing_qty = absint( $data['qty_missing'] );
         $qty_remove = $previous_missing_qty ? $previous_missing_qty : $billable_qty;
         $qty_remove = max( 1, min( $qty_remove, $billable_qty ) );
 
-        $share       = LP_Missing_Pricing::get_item_share( $item, $qty_remove );
+        $share       = LP_Missing_Pricing::get_item_share( $item, $qty_remove, 'refund' === $mode );
         $gross       = wc_format_decimal( (float) $share['total'] + array_sum( array_map( 'floatval', $share['taxes']['total'] ) ), wc_get_price_decimals() );
         $item_name   = $item->get_name();
         $new_qty     = $item->get_quantity();
@@ -253,20 +285,28 @@ class LP_Missing_Apply_Service {
             $refund_tax    = $share['taxes']['total'];
             $refund_amount = wc_format_decimal( (float) $share['total'] + array_sum( array_map( 'floatval', $refund_tax ) ), wc_get_price_decimals() );
             if ( $refund_amount > 0 ) {
-                $refund = wc_create_refund( array(
-                    'amount'         => $refund_amount,
-                    'reason'         => 'automatic' === $context ? __( 'Decision deadline passed: missing items removed.', 'lp-missing' ) : __( 'Customer approved deletion of missing items.', 'lp-missing' ),
-                    'order_id'       => $order->get_id(),
-                    'line_items'     => array(
-                        $item_id => array(
-                            'qty'          => $qty_remove,
-                            'refund_total' => $share['total'],
-                            'refund_tax'   => $refund_tax,
+                LP_Missing_Lifecycle::$pause_reconcile = true;
+                try {
+                    $refund = wc_create_refund( array(
+                        'amount'         => $refund_amount,
+                        'reason'         => 'automatic' === $context ? __( 'Decision deadline passed: missing items removed.', 'lp-missing' ) : __( 'Customer approved deletion of missing items.', 'lp-missing' ),
+                        'order_id'       => $order->get_id(),
+                        'line_items'     => array(
+                            $item_id => array(
+                                'qty'          => $qty_remove,
+                                'refund_total' => $share['total'],
+                                'refund_tax'   => $refund_tax,
+                            ),
                         ),
-                    ),
-                    'refund_payment' => false,
-                    'restock_items'  => false,
-                ) );
+                        // Sent to the customer through the gateway when it can (e.g. Dintero after capture), else recorded only.
+                        'refund_payment' => $via_gateway,
+                        'restock_items'  => false,
+                        // Marks the refund as the plugin's (the customer is told in the plugin's own note).
+                        'lp_missing'     => true,
+                    ) );
+                } finally {
+                    LP_Missing_Lifecycle::$pause_reconcile = false;
+                }
                 if ( is_wp_error( $refund ) ) {
                     // Keep the line open so staff can retry or handle it manually.
                     $order->add_order_note( sprintf( __( 'Refund could not be created for missing-item deletion: %s', 'lp-missing' ), $refund->get_error_message() ) );
@@ -309,23 +349,34 @@ class LP_Missing_Apply_Service {
         }
 
         $amount_text = LP_Missing_Util::plain_price( $gross, $order );
-        if ( 'refund' === $mode ) {
+        if ( 'refund' === $mode && $via_gateway ) {
+            /* translators: 1: quantity, 2: product, 3: amount, 4: payment provider */
+            $note = sprintf( __( 'Refunded to the customer through %4$s: %1$d × %2$s (%3$s).', 'lp-missing' ), $qty_remove, $item_name, $amount_text, LP_Missing_Payment::get_gateway_title( $order ) );
+        } elseif ( 'refund' === $mode ) {
             /* translators: 1: quantity, 2: product, 3: amount */
             $note = sprintf( __( 'Refund recorded: %1$d × %2$s (%3$s). Pay it back in the payment provider.', 'lp-missing' ), $qty_remove, $item_name, $amount_text );
         } else {
             /* translators: 1: quantity, 2: product, 3: amount */
             $note = sprintf( __( 'Removed from the order: %1$d × %2$s (−%3$s).', 'lp-missing' ), $qty_remove, $item_name, $amount_text );
         }
+        $payment_state = LP_Missing_Payment::get_state( $order );
+        if ( 'reduce' === $mode && LP_Missing_Payment::RESERVED === $payment_state && (float) $order->get_total() <= 0 ) {
+            $note .= ' ' . __( 'Nothing is left to charge: cancel the order to release the reserved payment.', 'lp-missing' );
+        } elseif ( 'reduce' === $mode && LP_Missing_Payment::PAID === $payment_state ) {
+            /* translators: %s: amount */
+            $note .= ' ' . sprintf( __( 'The order is paid: if the payment is already charged, pay %s back in the payment provider.', 'lp-missing' ), $amount_text );
+        }
         $order->add_order_note( $note );
-        self::add_customer_note( $order, self::describe_deletion_for_customer( $order, $item_name, $qty_remove, $mode, $gross ), $context );
+        self::add_customer_note( $order, self::describe_deletion_for_customer( $order, $item_name, $qty_remove, $mode, $gross, $via_gateway ), $context );
 
         do_action( 'lp_missing_item_updated', $order, $item_id, $new_data, $data );
 
         return array(
             'status'  => 'success',
-            'message' => __( 'Deletion applied to the order.', 'lp-missing' ),
+            'message' => $note,
             'qty'     => $qty_remove,
             'amount'  => $gross,
+            'mode'    => $mode,
         );
     }
 
@@ -448,8 +499,45 @@ class LP_Missing_Apply_Service {
          * @param string   $context 'manual' or 'automatic'.
          */
         $text = (string) apply_filters( 'lp_missing_customer_note', $text, $order, $context );
-        if ( '' !== trim( $text ) ) {
-            $order->add_order_note( $text, 1, false );
+        if ( '' === trim( $text ) ) {
+            return;
+        }
+        /**
+         * Filter how long staff decisions are collected before the customer gets one note (email) about them.
+         * 0 sends each note right away.
+         *
+         * @param int      $delay Seconds.
+         * @param WC_Order $order Order.
+         */
+        $delay = 'manual' === $context ? (int) apply_filters( 'lp_missing_customer_note_delay', 5 * MINUTE_IN_SECONDS, $order ) : 0;
+        if ( $delay > 0 ) {
+            // Staff often settle several lines in a row: collect them, so the customer gets one email instead of one each.
+            $pending   = (array) $order->get_meta( self::PENDING_NOTES_META, true );
+            $pending[] = $text;
+            $order->update_meta_data( self::PENDING_NOTES_META, array_values( array_filter( $pending ) ) );
+            $order->save_meta_data();
+            $args = array( $order->get_id() );
+            if ( ! LP_Missing_Scheduler::next( LP_Missing_Scheduler::CUSTOMER_NOTE_HOOK, $args ) ) {
+                LP_Missing_Scheduler::schedule_single( time() + $delay, LP_Missing_Scheduler::CUSTOMER_NOTE_HOOK, $args );
+            }
+            return;
+        }
+        $order->add_order_note( $text, 1, false );
+    }
+
+    /**
+     * Job: send the collected notes about staff decisions to the customer as one note.
+     */
+    public static function flush_customer_notes( $order_id ) {
+        $order = wc_get_order( absint( $order_id ) );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        $pending = array_filter( (array) $order->get_meta( self::PENDING_NOTES_META, true ) );
+        $order->delete_meta_data( self::PENDING_NOTES_META );
+        $order->save_meta_data();
+        if ( $pending ) {
+            $order->add_order_note( implode( "\n\n", $pending ), 1, false );
         }
     }
 
@@ -467,24 +555,32 @@ class LP_Missing_Apply_Service {
         } elseif ( $delta <= -$threshold ) {
             $parts[] = __( 'Erstatningen er rimeligere, og ordresummen er uendret.', 'lp-missing' );
         }
-        if ( $remaining > 0 ) {
-            /* translators: 1: quantity, 2: product name */
-            $parts[] = sprintf( __( 'Vi trenger fortsatt valget ditt for %1$d stk %2$s.', 'lp-missing' ), $remaining, $original_name );
-        }
+        // A remaining quantity gets its own customer email with the link, so it is not repeated here.
         return implode( ' ', $parts );
     }
 
-    public static function describe_deletion_for_customer( $order, $item_name, $qty, $mode, $amount ) {
+    /**
+     * @param bool $via_gateway Whether a refund was sent through the payment provider (else staff pay it back later).
+     */
+    public static function describe_deletion_for_customer( $order, $item_name, $qty, $mode, $amount, $via_gateway = true ) {
         if ( 'refund' === $mode ) {
-            if ( (float) $amount > 0 ) {
+            if ( (float) $amount <= 0 ) {
+                /* translators: 1: product name, 2: quantity */
+                return sprintf( __( 'Vi har fjernet %1$s (%2$d stk).', 'lp-missing' ), $item_name, $qty );
+            }
+            if ( $via_gateway ) {
                 /* translators: 1: product name, 2: quantity, 3: amount */
                 return sprintf( __( 'Vi har fjernet %1$s (%2$d stk) og refundert %3$s.', 'lp-missing' ), $item_name, $qty, LP_Missing_Util::plain_price( $amount, $order ) );
             }
-            /* translators: 1: product name, 2: quantity */
-            return sprintf( __( 'Vi har fjernet %1$s (%2$d stk).', 'lp-missing' ), $item_name, $qty );
+            /* translators: 1: product name, 2: quantity, 3: amount */
+            return sprintf( __( 'Vi har fjernet %1$s (%2$d stk), og du får %3$s tilbake.', 'lp-missing' ), $item_name, $qty, LP_Missing_Util::plain_price( $amount, $order ) );
         }
         /* translators: 1: product name, 2: quantity, 3: amount */
-        return sprintf( __( 'Vi har fjernet %1$s (%2$d stk) fra ordren, og ordresummen er redusert med %3$s.', 'lp-missing' ), $item_name, $qty, LP_Missing_Util::plain_price( $amount, $order ) );
+        $text = sprintf( __( 'Vi har fjernet %1$s (%2$d stk) fra ordren, og ordresummen er redusert med %3$s.', 'lp-missing' ), $item_name, $qty, LP_Missing_Util::plain_price( $amount, $order ) );
+        if ( LP_Missing_Payment::RESERVED === LP_Missing_Payment::get_state( $order ) ) {
+            $text .= ' ' . __( 'Du blir bare belastet for varene vi sender.', 'lp-missing' );
+        }
+        return $text;
     }
 
     /* ------------------------------------------------------------------------------------------------------------
@@ -562,11 +658,28 @@ class LP_Missing_Apply_Service {
                     );
                     continue;
                 }
-                // Nothing was paid on an unpaid order, so there is nothing to refund: remove the quantity instead.
-                $mode   = 'refund' === $configured && $order->is_paid() ? 'refund' : 'reduce';
-                if ( 'reduce' === $mode && $order->is_paid() ) {
-                    $order->add_order_note( __( 'Deadline action "remove from order totals" on a paid order: the customer has paid for the removed quantity. Release or refund it with the payment provider.', 'lp-missing' ) );
+                // A completed order is charged: sending money back is for staff to decide, not an automatic job.
+                if ( $order->has_status( 'completed' ) || LP_Missing_Payment::CAPTURED === LP_Missing_Payment::get_state( $order ) ) {
+                    $data['needs_attention']       = true;
+                    $data['auto_action_failed_at'] = $now;
+                    $item->update_meta_data( LP_Missing_Plugin::META_KEY, $data );
+                    $item->save();
+                    LP_Missing_Orders::refresh_order_flags( $order );
+                    /* translators: %s: product name */
+                    $order->add_order_note( sprintf( __( 'Decision deadline passed for %s, but the order is completed and the payment charged. No automatic action taken; settle it in the Missing items box.', 'lp-missing' ), $item->get_name() ) );
+                    $results[ $item_id ] = array(
+                        'name'    => $item->get_name(),
+                        'qty'     => $data['qty_missing'],
+                        'action'  => 'skipped',
+                        'status'  => 'error',
+                        'message' => __( 'The order is completed; settle it manually.', 'lp-missing' ),
+                        'amount'  => 0,
+                    );
+                    continue;
                 }
+                // Unpaid and reserved payments: remove the quantity (the customer is charged less). Paid through an
+                // unknown gateway: as configured.
+                $mode = LP_Missing_Payment::get_removal_mode( $order, $configured );
                 $name   = $item->get_name();
                 $qty    = $data['qty_missing'];
                 $result = self::apply_delete_decision( $order, $item, $item_id, $data, $mode, 'automatic' );

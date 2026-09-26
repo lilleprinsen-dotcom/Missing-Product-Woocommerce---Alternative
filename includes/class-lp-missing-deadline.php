@@ -70,11 +70,11 @@ class LP_Missing_Deadline {
             return '';
         }
         $when = self::format( $timestamp );
-        // Nothing was paid on an unpaid order, so the automatic action removes the item instead of refunding it.
-        $unpaid = $order instanceof WC_Order && ! $order->is_paid();
-        if ( 'reduce' === self::get_action() || $unpaid ) {
-            return sprintf( __( 'Hvis vi ikke hører fra deg innen %s, fjerner vi varen fra ordren.', 'lp-missing' ), $when );
+        // Unpaid and reserved payments have the item removed (the customer is charged less) instead of refunded.
+        $removes = $order instanceof WC_Order ? 'reduce' === LP_Missing_Payment::get_removal_mode( $order, self::get_action() ) : 'reduce' === self::get_action();
+        if ( $removes ) {
+            return sprintf( __( 'Hvis vi ikke hører fra deg innen %s, fjerner vi det som mangler fra ordren.', 'lp-missing' ), $when );
         }
-        return sprintf( __( 'Hvis vi ikke hører fra deg innen %s, refunderer vi varen.', 'lp-missing' ), $when );
+        return sprintf( __( 'Hvis vi ikke hører fra deg innen %s, refunderer vi det som mangler.', 'lp-missing' ), $when );
     }
 }

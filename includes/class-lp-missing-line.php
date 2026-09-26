@@ -87,7 +87,7 @@ class LP_Missing_Line {
      */
     public static function get_item_billable_qty( $item ) {
         $moved = absint( $item->get_meta( LP_Missing_Plugin::MOVED_QTY_META, true ) );
-        return max( 1, absint( $item->get_quantity() ) - $moved );
+        return max( 0, absint( $item->get_quantity() ) - $moved );
     }
 
     /**

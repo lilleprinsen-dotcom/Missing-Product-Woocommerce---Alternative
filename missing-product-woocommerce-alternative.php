@@ -2,11 +2,13 @@
 /**
  * Plugin Name: Missing Product WooCommerce Alternative
  * Description: Handles missing items, alternatives, and customer responses for WooCommerce orders.
- * Version: 1.3.0
+ * Version: 1.4.0
  * Text Domain: lp-missing
  * Domain Path: /languages
- * Requires Plugins: woocommerce
+ * Requires at least: 6.5
  * Requires PHP: 7.4
+ * Requires Plugins: woocommerce
+ * WC tested up to: 11.1
  */
 
 if ( ! defined( 'ABSPATH' ) ) {

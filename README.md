@@ -23,12 +23,31 @@ The admin screens, staff emails and order notes are in English with a Norwegian 
 
 - The alternative line takes over exactly the original line's share (net, per-rate VAT, discounts), so the order total does not change; the price difference is handled separately (surcharge order or covered by the store).
 - Prices are compared including VAT for the order's own tax address, before coupon discounts. Alternatives in another tax class or tax status keep the paid gross amount, re-split at their own rate.
-- Refunds are recorded on the order line (quantity, net and VAT). Money is paid back through the payment provider manually.
+- Shares of a line are split on the amount the customer paid (incl. VAT, rounded to the shop's price decimals), so 3 × 19.99 splits into 19.99 + 39.98 and refunds of every unit add up to the line, also with 0 decimals.
+- Refunds are recorded on the order line (quantity, net and VAT). A refund made in WooCommerce on a line with an open case settles that many missing units, so the plugin never refunds them twice.
+- A replacement line counts as the original product for coupons, so re-calculating the order's coupons keeps the total.
+
+### Payment (reserve and capture, e.g. Dintero)
+
+What happens to a missing quantity depends on where the customer's money stands:
+
+| Payment | Removing a missing quantity | |
+|---|---|---|
+| Unpaid (pending, on hold, failed) | lowers the order total | |
+| Reserved (Dintero, before the order is completed) | lowers the order total, so Dintero charges less at capture | «Record a refund» is not offered: nothing is charged yet |
+| Captured (Dintero, after the order is completed) | is refunded to the customer through Dintero | lowering the total is refused |
+| Paid through another gateway | lowers the total (default) or records a refund; staff pay it back in the payment provider | |
+
+- Dintero Checkout captures when the order is set to Completed and can lower the amount, never raise it. Complete orders only when every missing item is settled: completing with open cases adds a warning (order note and notice), and those items are then refunded through Dintero when settled.
+- A dearer replacement's difference is invoiced as a separate surcharge order (Dintero cannot charge more than was reserved). Unpaid surcharge orders are cancelled when their main order is cancelled or refunded.
+- A replacement that takes over a whole line keeps its Dintero line ID; a partial one gets an ID of its own.
+- Other reserve-and-capture gateways can report their state with the `lp_missing_payment_state` filter.
+- WooCommerce's own refund email is not sent for refunds the plugin makes: the customer gets the plugin's note instead. Notes about several staff decisions on one order are collected for a few minutes and sent as one email.
 
 ### Stock
 
 - While a case is open, the missing quantity is locked (stock reduced by that amount) if "Lock stock for missing quantities" is on. The lock is released when the case is resolved, cleared, the line is deleted, or the order is cancelled, refunded, failed or deleted. A failed order keeps its case, and the lock is taken again if the payment is retried.
-- Units confirmed missing never come back into stock: when a line is reduced, only its stock record follows the new quantity, so WooCommerce's own stock sync does not restock them later. Alternatives reduce stock like any added line (for orders whose stock is already reduced; unpaid orders reduce stock at payment).
+- Units confirmed missing never come back into stock: when a line is reduced, only its stock record follows the new quantity, so WooCommerce's own stock sync does not restock them later. The same holds for units moved to a replacement added as a separate line. Alternatives reduce stock like any added line (for orders whose stock is already reduced; unpaid orders reduce stock at payment).
 
 ## Extending
 
@@ -60,6 +79,8 @@ Filters:
 | `lp_missing_store_covers_difference` | `$covers, $gross_delta` | Whether the store absorbs a price difference. |
 | `lp_missing_price_delta` | `$delta, $order, $item, $alt_product, $qty, $snapshot` | Price difference (incl. VAT) used for the surcharge. |
 | `lp_missing_customer_note` | `$text, $order, $context` | Customer-visible order note written after an apply. |
+| `lp_missing_customer_note_delay` | `$seconds, $order` | How long notes about staff decisions are collected before the customer gets one email (default 300; 0 sends each at once). |
+| `lp_missing_payment_state` | `$state, $order` | Where the customer's money stands: `unpaid`, `reserved`, `captured` or `paid`. |
 | `lp_missing_email_lines` | `$lines, $order, $awaiting_only` | Lines listed in customer emails. |
 | `lp_missing_next_reminder_time` | `$time, $from` | When the next reminder goes out (default: pushed into the reminder hours). |
 | `lp_missing_variant_suggestions` | `$products, $item, $order, $qty` | "Other sizes/variants" suggestions. |

@@ -1,5 +1,6 @@
 <?php
 // Core integration tests. Run with: wp eval-file tests/integration/test-plugin.php (see tests/README.md).
+defined( 'ABSPATH' ) || exit; // Runs inside WordPress (wp eval-file), never over HTTP.
 require __DIR__ . '/bootstrap.php';
 require __DIR__ . '/portal-helpers.php';
 

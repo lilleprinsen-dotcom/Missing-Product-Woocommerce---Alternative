@@ -219,7 +219,8 @@ class LP_Missing_Notifier {
             $alternatives = array();
             foreach ( $data['alternatives'] as $alt_id ) {
                 $alt = wc_get_product( $alt_id );
-                if ( $alt ) {
+                // Same as the customer page: sold-out and deleted products are not offered.
+                if ( $alt && 'trash' !== $alt->get_status() && $alt->is_in_stock() ) {
                     $alternatives[] = $alt->get_name();
                 }
             }
@@ -381,7 +382,8 @@ class LP_Missing_Notifier {
                 }
             );
         }
-        // Schedule the deadline job now that the customer knows about the deadline.
-        LP_Missing_Lifecycle::sync_order_schedule( $order );
+        // Schedule the deadline job now that the customer knows about the deadline, and count the reminder spacing
+        // from this email (also when staff send it again by hand).
+        LP_Missing_Lifecycle::sync_order_schedule( $order, true );
     }
 }

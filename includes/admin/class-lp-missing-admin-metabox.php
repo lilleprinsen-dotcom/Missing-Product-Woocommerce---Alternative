@@ -1,6 +1,6 @@
 <?php
 /**
- * The "Missing / Problem Items" box on the order screen.
+ * The "Missing items" box on the order screen.
  *
  * @package LP_Missing
  */
@@ -24,14 +24,14 @@ class LP_Missing_Admin_Metabox {
      * The plugin's bookkeeping on order lines is not for display on the order screen.
      */
     public static function hide_internal_item_meta( $hidden ) {
-        return array_merge( (array) $hidden, array( LP_Missing_Plugin::META_KEY, LP_Missing_Plugin::MOVED_QTY_META, '_lp_missing_alt_pricing_source', '_lp_missing_alt_original_item_id' ) );
+        return array_merge( (array) $hidden, array( LP_Missing_Plugin::META_KEY, LP_Missing_Plugin::MOVED_QTY_META, '_lp_missing_alt_pricing_source', '_lp_missing_alt_original_item_id', '_lp_missing_alt_original_product_id', '_lp_missing_moved_stock_synced' ) );
     }
 
     public static function add_metabox() {
         $screen = function_exists( 'wc_get_page_screen_id' ) ? wc_get_page_screen_id( 'shop-order' ) : 'shop_order';
         add_meta_box(
             'lp_missing_metabox',
-            __( 'Missing / Problem Items', 'lp-missing' ),
+            __( 'Missing items', 'lp-missing' ),
             array( __CLASS__, 'render_metabox' ),
             $screen ? $screen : 'shop_order',
             'normal',
@@ -77,8 +77,18 @@ class LP_Missing_Admin_Metabox {
             $has_case = $has_case || $item->meta_exists( LP_Missing_Plugin::META_KEY );
         }
 
-        echo '<div class="lp-missing-metabox" data-order-id="' . absint( $order->get_id() ) . '" data-nonce="' . esc_attr( LP_Missing_Admin_Alternatives::create_nonce( $order->get_id() ) ) . '">';
-        self::render_summary( $states );
+        $open = count( array_filter( $states, array( __CLASS__, 'is_open_state' ) ) );
+        echo '<div class="lp-missing-metabox" data-order-id="' . absint( $order->get_id() ) . '" data-nonce="' . esc_attr( LP_Missing_Admin_Alternatives::create_nonce( $order->get_id() ) ) . '" data-open="' . absint( $open ) . '">';
+        self::render_summary( $states, $order );
+        if ( $open && LP_Missing_Payment::CAPTURED === LP_Missing_Payment::get_state( $order ) ) {
+            echo '<p class="lp-box-warning">' . esc_html( sprintf(
+                /* translators: %s: payment provider */
+                __( 'The payment is already charged. Settle the missing items below: refunds are sent to the customer through %s.', 'lp-missing' ),
+                LP_Missing_Payment::get_gateway_title( $order )
+            ) ) . '</p>';
+        } elseif ( $open && $order->has_status( 'completed' ) ) {
+            echo '<p class="lp-box-warning">' . esc_html__( 'The order is completed although missing items are not settled. Settle them below and pay back what the customer was charged for them.', 'lp-missing' ) . '</p>';
+        }
         echo '<div class="lp-lines">';
         foreach ( $items as $item_id => $item ) {
             self::render_line( $order, $item_id, $item, $states[ $item_id ], $product_cache, $context );
@@ -143,7 +153,7 @@ class LP_Missing_Admin_Metabox {
     /**
      * One sentence on top of the box: how many lines wait for what.
      */
-    protected static function render_summary( $states ) {
+    protected static function render_summary( $states, $order = null ) {
         $counts = array_count_values( $states );
         $parts  = array();
         $ready  = ( isset( $counts['chosen_alt'] ) ? $counts['chosen_alt'] : 0 ) + ( isset( $counts['chosen_delete'] ) ? $counts['chosen_delete'] : 0 ) + ( isset( $counts['declined'] ) ? $counts['declined'] : 0 );
@@ -164,12 +174,28 @@ class LP_Missing_Admin_Metabox {
             $parts[] = array( 'done', sprintf( _n( '%d done', '%d done', $counts['done'], 'lp-missing' ), $counts['done'] ) );
         }
 
+        // Surcharge orders for dearer replacements: staff ship the replacement once the customer has paid.
+        foreach ( $order instanceof WC_Order ? LP_Missing_Payment::get_surcharge_orders( $order ) : array() as $surcharge ) {
+            $amount = LP_Missing_Util::plain_price( $surcharge->get_total(), $surcharge );
+            if ( $surcharge->is_paid() ) {
+                /* translators: 1: order number, 2: amount */
+                $parts[] = array( 'done', sprintf( __( 'Surcharge #%1$s (%2$s) paid', 'lp-missing' ), $surcharge->get_order_number(), $amount ), $surcharge );
+            } elseif ( ! $surcharge->has_status( array( 'cancelled', 'refunded', 'trash' ) ) ) {
+                /* translators: 1: order number, 2: amount */
+                $parts[] = array( 'attention', sprintf( __( 'Surcharge #%1$s (%2$s) not paid yet', 'lp-missing' ), $surcharge->get_order_number(), $amount ), $surcharge );
+            }
+        }
+
         echo '<div class="lp-summary">';
         if ( ! $parts ) {
             echo '<p class="lp-summary__empty">' . esc_html__( 'Nothing is missing. If an item cannot be picked, press «Missing» on its line.', 'lp-missing' ) . '</p>';
         } else {
             foreach ( $parts as $part ) {
-                echo '<span class="lp-pill lp-pill--' . esc_attr( $part[0] ) . '">' . esc_html( $part[1] ) . '</span>';
+                if ( isset( $part[2] ) ) {
+                    echo '<a class="lp-pill lp-pill--' . esc_attr( $part[0] ) . '" href="' . esc_url( LP_Missing_Util::get_order_edit_url( $part[2] ) ) . '">' . esc_html( $part[1] ) . '</a>';
+                } else {
+                    echo '<span class="lp-pill lp-pill--' . esc_attr( $part[0] ) . '">' . esc_html( $part[1] ) . '</span>';
+                }
             }
         }
         echo '</div>';
@@ -212,7 +238,7 @@ class LP_Missing_Admin_Metabox {
             echo '<span class="lp-badge lp-badge--' . esc_attr( $state ) . '">' . esc_html( self::get_state_label( $state ) ) . '</span>';
             // Stays checked while the case is open; «Cancel the case» unchecks it.
             echo '<input type="checkbox" class="lp-missing-toggle" name="' . esc_attr( $field . '[missing]' ) . '" value="1" checked="checked" hidden="hidden" />';
-        } else {
+        } elseif ( LP_Missing_Line::get_item_available_qty( $item ) > 0 ) {
             echo '<label class="button lp-mark"><input type="checkbox" class="lp-missing-toggle" name="' . esc_attr( $field . '[missing]' ) . '" value="1" /> ';
             echo '<span class="lp-mark__text">' . esc_html( 'done' === $state ? __( 'Missing again', 'lp-missing' ) : __( 'Missing', 'lp-missing' ) ) . '</span></label>';
         }
@@ -243,7 +269,7 @@ class LP_Missing_Admin_Metabox {
             echo '<p class="lp-line__cancel"><button type="button" class="button-link lp-cancel-case">' . esc_html__( 'Cancel the case (the item is not missing after all)', 'lp-missing' ) . '</button>';
             echo '<span class="lp-cancel-note" hidden="hidden">' . esc_html__( 'The case is closed when you save: the customer is not asked, and the stock lock is released.', 'lp-missing' ) . ' <button type="button" class="button-link lp-undo-cancel">' . esc_html__( 'Undo', 'lp-missing' ) . '</button></span></p>';
             echo '</details>';
-        } else {
+        } elseif ( LP_Missing_Line::get_item_available_qty( $item ) > 0 ) {
             echo '<div class="lp-new-case" hidden="hidden">';
             self::render_editor( $order, $item_id, $item, $data, false, $product, $product_cache, $context );
             echo '</div>';
@@ -268,14 +294,16 @@ class LP_Missing_Admin_Metabox {
     protected static function render_editor( $order, $item_id, $item, $data, $open, $product, &$product_cache, $context ) {
         $field     = 'lp_missing_items[' . absint( $item_id ) . ']';
         $available = max( 1, LP_Missing_Line::get_item_available_qty( $item ) );
-        $qty       = $open && $data['qty_missing'] ? absint( $data['qty_missing'] ) : 1;
+        $qty       = min( $available, $open && $data['qty_missing'] ? absint( $data['qty_missing'] ) : 1 );
         $qty_id    = 'lp-missing-qty-' . absint( $item_id );
         $notes_id  = 'lp-missing-notes-' . absint( $item_id );
 
         echo '<div class="lp-editor">';
         echo '<div class="lp-editor__row lp-editor__row--qty"><label class="lp-editor__label" for="' . esc_attr( $qty_id ) . '">' . esc_html__( 'How many are missing?', 'lp-missing' ) . '</label>';
         echo '<span class="lp-stepper"><button type="button" class="button lp-step" data-step="-1" aria-label="' . esc_attr__( 'One fewer', 'lp-missing' ) . '">−</button>';
-        echo '<input type="number" id="' . esc_attr( $qty_id ) . '" class="lp-missing-qty" min="1" max="' . esc_attr( $available ) . '" inputmode="numeric" name="' . esc_attr( $field . '[qty_missing]' ) . '" value="' . esc_attr( $qty ) . '" />';
+        // Bounds in data-* (used by the stepper), not min/max: a hidden field out of range must never block saving the
+        // order; the server clamps the value to the line.
+        echo '<input type="number" id="' . esc_attr( $qty_id ) . '" class="lp-missing-qty" data-min="1" data-max="' . esc_attr( $available ) . '" inputmode="numeric" name="' . esc_attr( $field . '[qty_missing]' ) . '" value="' . esc_attr( $qty ) . '" />';
         echo '<button type="button" class="button lp-step" data-step="1" aria-label="' . esc_attr__( 'One more', 'lp-missing' ) . '">+</button></span>';
         /* translators: %d: quantity on the order line */
         echo ' <span class="lp-editor__hint">' . esc_html( sprintf( __( 'of %d', 'lp-missing' ), $available ) ) . '</span></div>';
@@ -400,23 +428,38 @@ class LP_Missing_Admin_Metabox {
         echo '<div class="lp-decision">';
         echo self::get_thumbnail_html( $alt ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- built with esc_url().
         echo '<div class="lp-decision__text"><span class="lp-decision__what">' . esc_html( sprintf( '%d × %s', $qty, $alt->get_name() ) ) . '</span>';
+        if ( $qty < absint( $data['qty_missing'] ) ) {
+            /* translators: 1: quantity chosen for, 2: missing quantity, 3: quantity still open */
+            echo '<span class="lp-decision__partial">' . esc_html( sprintf( __( 'Chosen for %1$d of %2$d missing; %3$d stays open.', 'lp-missing' ), $qty, $data['qty_missing'], absint( $data['qty_missing'] ) - $qty ) ) . '</span>';
+        }
         echo '<span class="lp-decision__money' . ( $invoice ? ' lp-decision__money--invoice' : '' ) . '">' . esc_html( $money ) . '</span>';
+        $stock_warning = '';
         if ( ! LP_Missing_Admin_Alternatives::can_cover( $alt, $qty ) ) {
             $left = $alt->managing_stock() ? max( 0, (int) $alt->get_stock_quantity() ) : 0;
             /* translators: %d: units in stock */
-            echo '<span class="lp-decision__warning">' . esc_html( $left ? sprintf( __( 'Only %d in stock – check before you replace.', 'lp-missing' ), $left ) : __( 'Out of stock – check before you replace.', 'lp-missing' ) ) . '</span>';
+            $stock_warning = $left ? sprintf( __( 'Only %d in stock – check before you replace.', 'lp-missing' ), $left ) : __( 'Out of stock – check before you replace.', 'lp-missing' );
+            echo '<span class="lp-decision__warning">' . esc_html( $stock_warning ) . '</span>';
         }
         echo '</div></div>';
 
-        /* translators: 1: quantity, 2: ordered product, 3: replacement product */
-        $confirm = sprintf( __( 'Replace %1$d × %2$s with %3$s on the order?', 'lp-missing' ), $qty, $item->get_name(), $alt->get_name() );
+        $extra = array();
         if ( $invoice ) {
             /* translators: %s: amount */
-            $confirm .= ' ' . sprintf( __( 'The customer is sent an invoice of %s.', 'lp-missing' ), $amount );
+            $extra[] = sprintf( __( 'The customer is sent an invoice of %s.', 'lp-missing' ), $amount );
         }
+        if ( $stock_warning ) {
+            $extra[] = $stock_warning;
+        }
+        /* translators: 1: quantity, 2: ordered product, 3: replacement product */
+        $confirm = trim( sprintf( __( 'Replace %1$d × %2$s with %3$s on the order?', 'lp-missing' ), $qty, $item->get_name(), $alt->get_name() ) . ' ' . implode( ' ', $extra ) );
+        /* translators: 1: quantity, 2: replacement product, 3: ordered product */
+        $confirm_add = trim( sprintf( __( 'Add %1$d × %2$s as a new line? %3$s stays on the order with its quantity; the price of the missing units moves to the new line.', 'lp-missing' ), $qty, $alt->get_name(), $item->get_name() ) . ' ' . implode( ' ', $extra ) );
         echo '<div class="lp-actions">';
         self::render_apply_link( $order, $item_id, 'alternative', 'replace', __( 'Replace the missing item', 'lp-missing' ), true, $confirm );
-        self::render_apply_link( $order, $item_id, 'alternative', 'add', __( 'or add it as a separate line', 'lp-missing' ), 'link', $confirm );
+        if ( ! LP_Missing_Payment::captures_order_lines( $order ) ) {
+            // Keeping the original quantity on its line would show the wrong quantity in the payment provider.
+            self::render_apply_link( $order, $item_id, 'alternative', 'add', __( 'or add it as a separate line', 'lp-missing' ), 'link', $confirm_add );
+        }
         echo '</div>';
     }
 
@@ -427,7 +470,7 @@ class LP_Missing_Admin_Metabox {
         $texts = array(
             'chosen_delete' => __( 'The customer wants the missing item removed from the order.', 'lp-missing' ),
             'declined'      => __( 'The customer said no thanks to the replacements. Remove the item, or suggest other replacements.', 'lp-missing' ),
-            'attention'     => __( 'The customer has not answered. Remove the item, or remind them by email.', 'lp-missing' ),
+            'attention'     => __( 'The customer has not answered. Remove the item, or send the customer a reminder (below).', 'lp-missing' ),
         );
         echo '<p class="lp-decision lp-decision--' . esc_attr( $state ) . '">' . esc_html( $texts[ $state ] ) . '</p>';
         if ( ! LP_Missing_Line::can_apply_deletion( $data ) ) {
@@ -438,21 +481,45 @@ class LP_Missing_Admin_Metabox {
         $share     = LP_Missing_Pricing::get_item_share( $item, $qty );
         $gross     = (float) $share['total'] + array_sum( array_map( 'floatval', $share['taxes']['total'] ) );
         $amount    = LP_Missing_Util::plain_price( $gross, $order );
+        // A refund is split from what is not refunded yet on the line.
+        $refund_share  = LP_Missing_Pricing::get_item_share( $item, $qty, true );
+        $refund_amount = LP_Missing_Util::plain_price( (float) $refund_share['total'] + array_sum( array_map( 'floatval', $refund_share['taxes']['total'] ) ), $order );
 
+        $payment = LP_Missing_Payment::get_state( $order );
+        $remove  = sprintf(
+            /* translators: 1: quantity, 2: product, 3: amount */
+            __( 'Remove %1$d × %2$s from the order? The order total goes down by %3$s.', 'lp-missing' ),
+            $qty,
+            $item->get_name(),
+            $amount
+        );
         echo '<div class="lp-actions">';
-        /* translators: 1: amount */
-        $label = sprintf( __( 'Remove from the order (−%s)', 'lp-missing' ), $amount );
-        /* translators: 1: quantity, 2: product, 3: amount */
-        self::render_apply_link( $order, $item_id, 'delete', 'reduce', $label, true, sprintf( __( 'Remove %1$d × %2$s from the order? The order total goes down by %3$s.', 'lp-missing' ), $qty, $item->get_name(), $amount ) );
-        /* translators: 1: amount, 2: quantity, 3: product */
-        self::render_apply_link( $order, $item_id, 'delete', 'refund', __( 'or record a refund instead', 'lp-missing' ), 'link', sprintf( __( 'Record a refund of %1$s for %2$d × %3$s? The order total stays the same; pay the money back in the payment provider.', 'lp-missing' ), $amount, $qty, $item->get_name() ) );
+        if ( LP_Missing_Payment::CAPTURED === $payment ) {
+            // Charged: the money goes back to the customer through the gateway.
+            $gateway = LP_Missing_Payment::get_gateway_title( $order );
+            /* translators: 1: amount */
+            $label = sprintf( __( 'Refund %s to the customer', 'lp-missing' ), $refund_amount );
+            /* translators: 1: amount, 2: quantity, 3: product, 4: payment provider */
+            self::render_apply_link( $order, $item_id, 'delete', 'refund', $label, true, sprintf( __( 'Refund %1$s for %2$d × %3$s? The money is sent back to the customer through %4$s.', 'lp-missing' ), $refund_amount, $qty, $item->get_name(), $gateway ) );
+        } else {
+            /* translators: 1: amount */
+            self::render_apply_link( $order, $item_id, 'delete', 'reduce', sprintf( __( 'Remove from the order (−%s)', 'lp-missing' ), $amount ), true, $remove );
+            if ( LP_Missing_Payment::PAID === $payment ) {
+                /* translators: 1: amount, 2: quantity, 3: product */
+                self::render_apply_link( $order, $item_id, 'delete', 'refund', __( 'or record a refund instead', 'lp-missing' ), 'link', sprintf( __( 'Record a refund of %1$s for %2$d × %3$s? The order total stays the same; pay the money back in the payment provider.', 'lp-missing' ), $refund_amount, $qty, $item->get_name() ) );
+            }
+        }
         if ( 'declined' === $state ) {
             echo '<button type="button" class="button-link lp-open-edit">' . esc_html__( 'Suggest other replacements', 'lp-missing' ) . '</button>';
-        } elseif ( 'attention' === $state ) {
-            $send_url = wp_nonce_url( add_query_arg( array( 'action' => 'lp_missing_send_email', 'order_id' => $order->get_id() ), admin_url( 'admin-post.php' ) ), 'lp_missing_send_email_' . $order->get_id() );
-            echo '<a class="button-link" href="' . esc_url( $send_url ) . '">' . esc_html__( 'Email the customer again', 'lp-missing' ) . '</a>';
         }
         echo '</div>';
+        if ( LP_Missing_Payment::RESERVED === $payment ) {
+            echo '<p class="lp-actions__hint">' . esc_html( sprintf(
+                /* translators: %s: payment provider */
+                __( 'The payment is only reserved: %s charges the lower amount when the order is completed.', 'lp-missing' ),
+                LP_Missing_Payment::get_gateway_title( $order )
+            ) ) . '</p>';
+        }
     }
 
     /**
@@ -461,13 +528,19 @@ class LP_Missing_Admin_Metabox {
     protected static function render_done( $order, $item_id, $item, $data, $context ) {
         $when = $data['resolved_at'] ? self::format_short_date( $data['resolved_at'] ) : '';
         if ( 'alt_applied' === $data['status'] ) {
-            $with = isset( $context['replacements']['by_original'][ $item_id ] ) ? implode( ', ', $context['replacements']['by_original'][ $item_id ] ) : '';
-            /* translators: %s: replacement products */
-            $text = $with ? sprintf( __( 'Replaced with %s', 'lp-missing' ), $with ) : __( 'Replacement applied', 'lp-missing' );
+            $with  = isset( $context['replacements']['by_original'][ $item_id ] ) ? implode( ', ', $context['replacements']['by_original'][ $item_id ] ) : '';
+            $added = absint( $item->get_meta( LP_Missing_Plugin::MOVED_QTY_META, true ) ) > 0;
+            if ( $with && $added ) {
+                /* translators: %s: replacement products */
+                $text = sprintf( __( 'Added %s as a separate line', 'lp-missing' ), $with );
+            } else {
+                /* translators: %s: replacement products */
+                $text = $with ? sprintf( __( 'Replaced with %s', 'lp-missing' ), $with ) : __( 'Replacement applied', 'lp-missing' );
+            }
         } else {
             $refunded = absint( $order->get_qty_refunded_for_item( $item_id ) );
             /* translators: %d: quantity */
-            $text = $refunded ? sprintf( __( 'Refund recorded for %d', 'lp-missing' ), $refunded ) : __( 'Removed from the order', 'lp-missing' );
+            $text = $refunded ? sprintf( __( 'Refunded %d', 'lp-missing' ), $refunded ) : __( 'Removed from the order', 'lp-missing' );
         }
         echo '<p class="lp-line__done"><span class="dashicons dashicons-yes-alt" aria-hidden="true"></span> ' . esc_html( $text . ( $when ? ' · ' . $when : '' ) ) . '</p>';
     }
@@ -541,7 +614,7 @@ class LP_Missing_Admin_Metabox {
         if ( $awaiting ) {
             /* translators: 1: reminders sent, 2: maximum number of reminders */
             $parts[] = sprintf( __( '%1$d/%2$d reminders', 'lp-missing' ), $data['reminder_count'], LP_Missing_Settings::get( 'reminder_max_count' ) );
-            if ( $next_reminder ) {
+            if ( $next_reminder && empty( $data['needs_attention'] ) && $data['reminder_count'] < absint( LP_Missing_Settings::get( 'reminder_max_count' ) ) ) {
                 /* translators: %s: date and time */
                 $parts[] = sprintf( __( 'next %s', 'lp-missing' ), self::format_short_date( $next_reminder, true ) );
             }
@@ -632,6 +705,7 @@ class LP_Missing_Admin_Metabox {
                 'i18n'    => array(
                     'copied'     => __( 'Customer link copied.', 'lp-missing' ),
                     'inserted'   => __( 'Text added to the message.', 'lp-missing' ),
+                    'completeOpen' => __( 'Some missing items on this order are not settled yet. When the order is completed, the payment provider may charge the full amount, including the missing items. Complete the order anyway?', 'lp-missing' ),
                     'copyManual' => __( 'Copy the link from the field (Ctrl+C / Cmd+C).', 'lp-missing' ),
                     'searching'  => __( 'Looking for variants…', 'lp-missing' ),
                     /* translators: %d: number of variants */
@@ -759,6 +833,10 @@ class LP_Missing_Admin_Metabox {
 
             // Never write tracking data for lines that are not (and were not) missing.
             if ( ! $missing && ! $was_missing ) {
+                continue;
+            }
+            // No unit is left to be missing (all refunded, or moved to a replacement line): nothing to open.
+            if ( $missing && LP_Missing_Line::is_line_resolved( $existing ) && LP_Missing_Line::get_item_available_qty( $item ) < 1 ) {
                 continue;
             }
 

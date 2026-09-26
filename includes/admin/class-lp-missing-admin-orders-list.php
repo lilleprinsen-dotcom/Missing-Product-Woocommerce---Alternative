@@ -21,6 +21,16 @@ class LP_Missing_Admin_Orders_List {
         add_filter( 'woocommerce_order_list_table_prepare_items_query_args', array( __CLASS__, 'filter_missing_orders_view_hpos' ) );
         add_filter( 'manage_woocommerce_page_wc-orders_columns', array( __CLASS__, 'register_missing_column' ) );
         add_action( 'manage_woocommerce_page_wc-orders_custom_column', array( __CLASS__, 'render_missing_column' ), 10, 2 );
+        // Searching or filtering inside one of the plugin's views stays in that view.
+        add_action( 'restrict_manage_posts', array( __CLASS__, 'keep_view_in_filters' ), 10, 2 );
+        add_action( 'woocommerce_order_list_table_restrict_manage_orders', array( __CLASS__, 'keep_view_in_filters' ), 10, 2 );
+    }
+
+    public static function keep_view_in_filters( $type = '', $which = 'top' ) {
+        $view = self::get_requested_view();
+        if ( $view && 'bottom' !== $which ) {
+            echo '<input type="hidden" name="lp_missing_view" value="' . esc_attr( $view ) . '" />';
+        }
     }
 
     /**

@@ -180,9 +180,12 @@ class LP_Missing_Admin_Actions {
         if ( is_array( $notice ) && isset( $notice['status'] ) ) {
             delete_transient( $notice_key );
             $success = 'success' === $notice['status'];
-            $human   = $success ? __( 'Customer decision applied.', 'lp-missing' ) : __( 'Could not apply the customer decision.', 'lp-missing' );
+            // Success: the result says exactly what was done. Failure: say that nothing was changed, and why.
+            $human = $success ? '' : __( 'Nothing was changed.', 'lp-missing' );
             if ( ! empty( $notice['message'] ) ) {
-                $human .= ' ' . $notice['message'];
+                $human = trim( $human . ' ' . $notice['message'] );
+            } elseif ( $success ) {
+                $human = __( 'Done.', 'lp-missing' );
             }
             $messages[] = array( $success ? 'success' : 'error', $human );
         }

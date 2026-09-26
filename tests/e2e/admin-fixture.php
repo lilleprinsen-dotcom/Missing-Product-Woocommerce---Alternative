@@ -1,6 +1,7 @@
 <?php
 // Browser fixture for tests/e2e/admin.e2e.cjs: orders for the admin order screen and the order list.
 //   wp eval-file tests/e2e/admin-fixture.php | tail -1 > tests/e2e/admin-fixture.json
+defined( 'ABSPATH' ) || exit; // Runs inside WordPress (wp eval-file), never over HTTP.
 
 function afx_simple( $name, $price, $stock ) {
 	$p = new WC_Product_Simple();

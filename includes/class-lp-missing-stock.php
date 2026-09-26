@@ -21,7 +21,13 @@ class LP_Missing_Stock {
         add_action( 'woocommerce_order_status_changed', array( __CLASS__, 'handle_order_recovered' ), 10, 4 );
         // Fires before the order's items are deleted, for both storages (a permanently deleted order).
         add_action( 'woocommerce_delete_order_items', array( __CLASS__, 'handle_order_closed' ) );
+        // Units moved to a replacement line (add mode) are not shipped from the original product.
+        add_action( 'woocommerce_reduce_order_stock', array( __CLASS__, 'sync_moved_units_for_order' ) );
+        add_filter( 'woocommerce_prevent_adjust_line_item_product_stock', array( __CLASS__, 'adjust_moved_line_stock' ), 10, 3 );
     }
+
+    /** Set while this plugin runs WooCommerce's line stock sync itself. */
+    protected static $adjusting = false;
 
     /*
      * Stock model: units confirmed missing never come back into stock. The order's own stock reduction already
@@ -44,6 +50,71 @@ class LP_Missing_Stock {
             $item->update_meta_data( '_reduced_stock', $new );
             $item->save();
         }
+    }
+
+    /**
+     * A replacement added as a separate line (add mode) leaves the original line's quantity as it was, for reference.
+     * Its moved units are treated like a shrunk line: only the _reduced_stock record follows (no restock), so a
+     * cancellation gives back only the units that were really picked. Runs once per moved unit (tracked in a meta).
+     */
+    public static function sync_moved_units( $order, $item ) {
+        $moved  = absint( $item->get_meta( LP_Missing_Plugin::MOVED_QTY_META, true ) );
+        $synced = absint( $item->get_meta( '_lp_missing_moved_stock_synced', true ) );
+        if ( $moved <= $synced || ! self::order_stock_reduced( $order ) || '' === $item->get_meta( '_reduced_stock', true ) ) {
+            return;
+        }
+        $reduced = wc_stock_amount( $item->get_meta( '_reduced_stock', true ) );
+        $item->update_meta_data( '_reduced_stock', max( 0, $reduced - ( $moved - $synced ) ) );
+        $item->update_meta_data( '_lp_missing_moved_stock_synced', $moved );
+        $item->save();
+    }
+
+    /**
+     * The order's stock was reduced (at payment) after a replacement was added: sync the moved units now.
+     */
+    public static function sync_moved_units_for_order( $order ) {
+        $order = $order instanceof WC_Order ? $order : wc_get_order( $order );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        foreach ( $order->get_items( 'line_item' ) as $item ) {
+            if ( $item->get_meta( LP_Missing_Plugin::MOVED_QTY_META, true ) ) {
+                self::sync_moved_units( $order, $item );
+            }
+        }
+    }
+
+    /**
+     * WooCommerce syncs a line's stock with its quantity when staff save the order items. On a line with moved units
+     * that sync must count only the units still billed on it, or it would take the moved units from stock again.
+     */
+    public static function adjust_moved_line_stock( $prevent, $item, $item_quantity = -1 ) {
+        if ( $prevent || self::$adjusting || ! $item instanceof WC_Order_Item_Product ) {
+            return $prevent;
+        }
+        $moved = absint( $item->get_meta( LP_Missing_Plugin::MOVED_QTY_META, true ) );
+        if ( ! $moved || ! function_exists( 'wc_maybe_adjust_line_item_product_stock' ) ) {
+            return $prevent;
+        }
+        $order = $item->get_order();
+        if ( $order instanceof WC_Order ) {
+            self::sync_moved_units( $order, $item );
+        }
+        $item_quantity = (int) $item_quantity;
+        if ( 0 === $item_quantity ) {
+            // The line is being deleted: WooCommerce gives back what the line took.
+            return $prevent;
+        }
+        $billable = ( $item_quantity > 0 ? $item_quantity : absint( $item->get_quantity() ) ) - $moved;
+        if ( $billable > 0 ) {
+            self::$adjusting = true;
+            try {
+                wc_maybe_adjust_line_item_product_stock( $item, $billable );
+            } finally {
+                self::$adjusting = false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -92,12 +163,14 @@ class LP_Missing_Stock {
         if ( $delta > 0 ) {
             wc_update_product_stock( $product, $delta, 'decrease' );
             if ( $add_notes ) {
-                $order->add_order_note( sprintf( __( 'Inventory decreased by %1$s for product %2$s. Reason: Missing-item stock lock delta.', 'lp-missing' ), $delta, $product->get_name() ) );
+                /* translators: 1: quantity, 2: product name */
+                $order->add_order_note( sprintf( __( 'Stock of %2$s lowered by %1$s (held for the missing item).', 'lp-missing' ), $delta, $product->get_name() ) );
             }
         } else {
             wc_update_product_stock( $product, abs( $delta ), 'increase' );
             if ( $add_notes ) {
-                $order->add_order_note( sprintf( __( 'Inventory increased by %1$s for product %2$s. Reason: Missing-item stock lock delta.', 'lp-missing' ), abs( $delta ), $product->get_name() ) );
+                /* translators: 1: quantity, 2: product name */
+                $order->add_order_note( sprintf( __( 'Stock of %2$s raised by %1$s (hold for the missing item released).', 'lp-missing' ), abs( $delta ), $product->get_name() ) );
             }
         }
     }

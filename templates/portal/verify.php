@@ -29,6 +29,6 @@ defined( 'ABSPATH' ) || exit;
             <input type="email" id="lp-verify-email" name="lp_missing_verify_email" autocomplete="email" inputmode="email" autocapitalize="none" spellcheck="false" required<?php echo $error ? ' aria-invalid="true" aria-describedby="lp-verify-error"' : ''; ?> />
             <button type="submit" class="lp-btn lp-btn--primary"><?php esc_html_e( 'Fortsett', 'lp-missing' ); ?></button>
         </form>
-        <p class="lp-portal-muted"><?php esc_html_e( 'Vi spør om dette for å beskytte bestillingen din. På denne enheten trenger du bare å gjøre det én gang.', 'lp-missing' ); ?></p>
+        <p class="lp-portal-muted"><?php esc_html_e( 'Vi spør om dette for å beskytte bestillingen din. Etterpå husker vi deg en stund på denne enheten.', 'lp-missing' ); ?></p>
     </div>
 </div>

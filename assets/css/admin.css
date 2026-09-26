@@ -262,6 +262,15 @@
     color: #8a2424;
 }
 
+.lp-decision__partial {
+    color: #50575e;
+}
+
+.lp-missing-apply.is-busy {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
 .lp-decision__warning {
     font-weight: 600;
     color: #d63638;
@@ -297,6 +306,24 @@
     color: #00a32a;
 }
 
+.lp-actions__hint {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: #646970;
+}
+
+.lp-box-warning {
+    margin: 10px 0 0;
+    padding: 8px 12px;
+    background: #fcf0f1;
+    border-left: 4px solid #d63638;
+    color: #8a2424;
+}
+
+a.lp-pill {
+    text-decoration: none;
+}
+
 /* Unsaved changes: save from the box. */
 .lp-savebar {
     position: sticky;
@@ -323,8 +350,14 @@
     }
 
     .lp-line__side {
+        box-sizing: border-box;
         flex-basis: 100%;
         padding-left: 50px;
+    }
+
+    .lp-preset {
+        display: inline-block;
+        padding: 6px 0;
     }
 
     .lp-line__body {
@@ -458,9 +491,12 @@
     color: #00a32a;
 }
 
-.lp-missing-state--attention .dashicons,
-.lp-missing-state--open .dashicons {
+.lp-missing-state--attention .dashicons {
     color: #d63638;
+}
+
+.lp-missing-state--open .dashicons {
+    color: #dba617;
 }
 
 .lp-missing-state--resolved .dashicons {

@@ -2,6 +2,7 @@
 // Browser fixture (wp eval-file): portal page, products with images/weight/stock, orders with open missing lines,
 // one order with a pending customer choice (admin test) and a staff preview URL with the matching login cookie.
 // Prints one JSON line; see e2e.cjs.
+defined( 'ABSPATH' ) || exit; // Runs inside WordPress (wp eval-file), never over HTTP.
 
 update_option( 'woocommerce_weight_unit', 'kg' );
 

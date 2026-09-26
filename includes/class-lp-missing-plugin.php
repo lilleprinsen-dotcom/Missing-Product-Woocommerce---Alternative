@@ -10,7 +10,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class LP_Missing_Plugin {
-    const VERSION = '1.3.0';
+    const VERSION = '1.4.0';
     const META_KEY = '_lp_missing_data';
     const OPTION_ENABLE_STOCK = 'lp_missing_enable_stock_log';
     const OPTION_SECRET = 'lp_missing_secret';
@@ -62,6 +62,8 @@ class LP_Missing_Plugin {
             'LP_Missing_Lifecycle',
             'LP_Missing_Scheduler',
             'LP_Missing_Stock',
+            'LP_Missing_Payment',
+            'LP_Missing_Pricing',
         );
     }
 

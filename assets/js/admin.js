@@ -127,7 +127,18 @@
     } );
 
     $( document ).on( 'click', '.lp-missing-confirm', function () {
-        return window.confirm( $( this ).data( 'confirm' ) );
+        var $link = $( this );
+        // One apply per click: a second click while the first request runs is ignored.
+        if ( $link.hasClass( 'is-busy' ) ) {
+            return false;
+        }
+        if ( ! window.confirm( $link.data( 'confirm' ) ) ) {
+            return false;
+        }
+        if ( $link.hasClass( 'lp-missing-apply' ) ) {
+            $link.addClass( 'is-busy' ).attr( 'aria-disabled', 'true' );
+        }
+        return true;
     } );
 
     $( document ).on( 'change', '.lp-missing-metabox .lp-alt-select', function () {
@@ -210,17 +221,44 @@
     // Case editing.
     // ---------------------------------------------------------------------------------------------------------
 
+    function boxState( $box ) {
+        return $box.find( ':input' ).not( '.lp-missing-link-field' ).serialize();
+    }
+
+    // The save bar shows while the box differs from what was loaded.
     function markDirty( $box ) {
         var $bar = $box.find( '.lp-savebar' );
         var $text = $bar.find( '.lp-savebar__text' );
         var isNew = $box.find( '.lp-mark .lp-missing-toggle:checked' ).length > 0;
+        if ( boxState( $box ) === $box.data( 'lpInitial' ) ) {
+            $bar.prop( 'hidden', true );
+            return;
+        }
         $text.text( isNew ? $text.data( 'new' ) : $text.data( 'changed' ) );
         $bar.prop( 'hidden', false );
     }
 
+    $( function () {
+        $( '.lp-missing-metabox' ).each( function () {
+            $( this ).data( 'lpInitial', boxState( $( this ) ) );
+        } );
+    } );
+
     $( document ).on( 'change input', '.lp-missing-metabox :input', function () {
         if ( ! $( this ).is( '.lp-missing-link-field' ) ) {
             markDirty( $( this ).closest( '.lp-missing-metabox' ) );
+        }
+    } );
+
+    // Enter in the box never submits the whole order (that would email the customer half-way through). On the
+    // «Missing» button it marks the line, like Space.
+    $( document ).on( 'keydown', '.lp-missing-metabox input', function ( e ) {
+        if ( 13 !== e.which ) {
+            return;
+        }
+        e.preventDefault();
+        if ( 'checkbox' === this.type ) {
+            $( this ).trigger( 'click' );
         }
     } );
 
@@ -239,13 +277,26 @@
         }
     } );
 
+    function clampQty( $input, value ) {
+        var min = parseInt( $input.data( 'min' ), 10 ) || 1;
+        var max = parseInt( $input.data( 'max' ), 10 ) || Math.max( min, value );
+        return Math.min( max, Math.max( min, value ) );
+    }
+
     $( document ).on( 'click', '.lp-step', function ( e ) {
         var $input = $( this ).siblings( '.lp-missing-qty' );
         var value = parseInt( $input.val(), 10 ) || 0;
-        var min = parseInt( $input.attr( 'min' ), 10 ) || 1;
-        var max = parseInt( $input.attr( 'max' ), 10 ) || value + 1;
         e.preventDefault();
-        $input.val( Math.min( max, Math.max( min, value + ( parseInt( $( this ).data( 'step' ), 10 ) || 0 ) ) ) ).trigger( 'change' );
+        $input.val( clampQty( $input, value + ( parseInt( $( this ).data( 'step' ), 10 ) || 0 ) ) ).trigger( 'change' );
+    } );
+
+    // A typed quantity outside the line is corrected when leaving the field.
+    $( document ).on( 'blur', '.lp-missing-metabox .lp-missing-qty', function () {
+        var $input = $( this );
+        var value = parseInt( $input.val(), 10 ) || 0;
+        if ( String( clampQty( $input, value ) ) !== String( $input.val() ) ) {
+            $input.val( clampQty( $input, value ) ).trigger( 'change' );
+        }
     } );
 
     $( document ).on( 'click', '.lp-preset', function ( e ) {
@@ -261,6 +312,8 @@
         $line.toggleClass( 'is-cancelling', cancelled );
         $line.find( '.lp-cancel-case' ).prop( 'hidden', cancelled );
         $line.find( '.lp-cancel-note' ).prop( 'hidden', ! cancelled );
+        // Keep the keyboard focus on the button that undoes what was just done.
+        $line.find( cancelled ? '.lp-undo-cancel' : '.lp-cancel-case' ).trigger( 'focus' );
     }
 
     $( document ).on( 'click', '.lp-cancel-case', function ( e ) {
@@ -292,6 +345,16 @@
             $button.trigger( 'click' );
         } else {
             $( this ).closest( 'form' ).trigger( 'submit' );
+        }
+    } );
+
+    // Completing the order charges the payment: ask first while missing items are not settled.
+    var initialStatus = $( '#order_status' ).val();
+    $( document ).on( 'submit', 'form#order, form#post', function ( e ) {
+        var open = parseInt( $( '.lp-missing-metabox' ).data( 'open' ), 10 ) || 0;
+        if ( open && 'wc-completed' === $( '#order_status' ).val() && 'wc-completed' !== initialStatus && ! window.confirm( i18n.completeOpen ) ) {
+            e.preventDefault();
+            return false;
         }
     } );
 
