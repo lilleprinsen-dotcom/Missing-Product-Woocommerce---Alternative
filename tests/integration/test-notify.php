@@ -289,7 +289,7 @@ admin_save_batched( $o, array(
 $portal_mails = mails_with_subject( 'Velg erstatning' );
 t_eq( 1, count( $portal_mails ), 'saving two missing lines sends one customer email' );
 $m = $portal_mails ? $portal_mails[0] : array( 'subject' => '', 'message' => '', 'to' => '' );
-t_eq( 'Velg erstatning for 2 vare(r) i ordre #' . $o->get_order_number(), $m['subject'], 'action-oriented subject with count and order number' );
+t_eq( 'Velg erstatning for det som mangler i ordre #' . $o->get_order_number(), $m['subject'], 'action-oriented subject with the order number' );
 t_ok( false !== strpos( $m['message'], 'Bleier str 4' ) && false !== strpos( $m['message'], 'Bleier eco' ), 'email lists both missing items' );
 t_ok( false === strpos( $m['message'], 'Bleier str 5</strong>' ), 'lines that are not missing are not listed' );
 t_ok( false !== strpos( $m['message'], '2 av 5 stk' ) && false !== strpos( $m['message'], '1 av 2 stk' ), 'missing quantities shown' );
@@ -314,7 +314,7 @@ $GLOBALS['lp_hooks'] = array();
 call( 'send_order_reminder', wc_get_order( $o->get_id() ) );
 $rem = mails_with_subject( 'Påminnelse' );
 t_eq( 1, count( $rem ), 'one reminder for two waiting lines' );
-t_eq( 'Påminnelse: velg erstatning for 2 vare(r) i ordre #' . $o->get_order_number(), $rem ? $rem[0]['subject'] : '', 'reminder subject' );
+t_eq( 'Påminnelse: velg erstatning for det som mangler i ordre #' . $o->get_order_number(), $rem ? $rem[0]['subject'] : '', 'reminder subject' );
 t_ok( $rem && false !== strpos( $rem[0]['message'], 'Bleier str 4' ) && false !== strpos( $rem[0]['message'], 'Bleier eco' ), 'reminder lists both lines' );
 t_eq( 'reminder', hooks_named( 'lp_missing_customer_notified' ) ? hooks_named( 'lp_missing_customer_notified' )[0][1][1] : '', 'lp_missing_customer_notified fired with type reminder' );
 t_eq( 1, item_data( $o->get_id(), $ids[0] )['reminder_count'], 'line 1 counted' );
@@ -327,7 +327,7 @@ set_line( $o->get_id(), $ids[0], array( 'last_reminder_at' => time() - 3 * DAY_I
 $GLOBALS['lp_mails'] = array();
 call( 'send_order_reminder', wc_get_order( $o->get_id() ) );
 $rem = mails_with_subject( 'Påminnelse' );
-t_ok( $rem && false !== strpos( $rem[0]['subject'], '1 vare(r)' ) && false === strpos( $rem[0]['message'], 'Bleier eco' ), 'decided line is no longer in the reminder' );
+t_ok( $rem && false === strpos( $rem[0]['message'], 'Bleier eco' ), 'decided line is no longer in the reminder' );
 t_eq( 1, item_data( $o->get_id(), $ids[1] )['reminder_count'], 'decided line is not counted again' );
 
 echo "\n[Reminders] Escalation\n";
@@ -435,7 +435,7 @@ apply_via_handler( $o->get_id(), $iid, 'alternative', 'replace' );
 $notes = customer_notes( $o->get_id() );
 t_ok( notes_contain( $notes, 'Vi har byttet Bleier str 4 med Bleier str 5 (2 stk).' ), 'customer note describes the swap' );
 t_ok( notes_contain( $notes, 'Mellomlegg på' ) && notes_contain( $notes, 'faktureres i en egen ordre' ), 'customer note mentions the surcharge order' );
-t_ok( notes_contain( internal_notes( $o->get_id() ), 'Applied customer-selected alternative' ), 'internal note kept' );
+t_ok( notes_contain( internal_notes( $o->get_id() ), 'Replacement applied' ), 'internal note kept' );
 t_eq( 1, count( array_filter( mails_to( 'kunde@example.com' ), function ( $m ) { return false !== strpos( $m['message'], 'Vi har byttet' ); } ) ), 'customer note reaches the customer by email' );
 $before = hooks_named( 'lp_missing_before_apply_decision' );
 $after  = hooks_named( 'lp_missing_after_apply_decision' );
@@ -463,7 +463,7 @@ $iid = first_item_id( $o );
 admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '2', 'propose_delete' => '1' ) ) );
 simulate_decision( $o->get_id(), $iid, array( 'status' => 'delete_pending', 'decision_made_at' => time() ) );
 apply_via_handler( $o->get_id(), $iid, 'delete', 'refund' );
-t_ok( notes_contain( customer_notes( $o->get_id() ), 'Vi har fjernet Bleier str 4 (2 stk) og refundert' ), 'customer note for a refund' );
+t_ok( notes_contain( customer_notes( $o->get_id() ), 'Vi har fjernet Bleier str 4 (2 stk), og du får kr' ), 'customer note for a recorded refund (paid back later)' );
 $o   = make_order( $A, 5 );
 $iid = first_item_id( $o );
 admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1', 'propose_delete' => '1' ) ) );
@@ -476,7 +476,7 @@ admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '3', 'a
 simulate_decision( $o->get_id(), $iid, array( 'status' => 'alt_pending', 'qty_alt' => 1 ), $C );
 apply_via_handler( $o->get_id(), $iid, 'alternative', 'add' );
 $notes = customer_notes( $o->get_id() );
-t_ok( notes_contain( $notes, 'Erstatningen er rimeligere' ) && notes_contain( $notes, 'Vi trenger fortsatt valget ditt for 2 stk Bleier str 4.' ), 'partial swap note: cheaper and remaining quantity' );
+t_ok( notes_contain( $notes, 'Erstatningen er rimeligere' ) && ! notes_contain( $notes, 'Vi trenger fortsatt' ), 'partial swap note: cheaper; the remaining quantity gets its own email' );
 
 // ---------- Deadline (L11) ----------
 echo "\n[L11] Default action after the deadline\n";
@@ -492,7 +492,7 @@ t_ok( in_array( $d['deadline_at'], array( LP_Missing_Deadline::calculate( $t0 ),
 t_eq( $d['deadline_at'], LP_Missing_Scheduler::next( 'lp_missing_order_deadline', array( $o->get_id() ) ), 'deadline job scheduled at the deadline' );
 t_eq( $d['deadline_at'], LP_Missing_Lifecycle::get_order_deadline( wc_get_order( $o->get_id() ) ), 'order deadline = line deadline' );
 $cm = mails_with_subject( 'Velg erstatning' );
-t_ok( $cm && false !== strpos( $cm[0]['message'], 'Hvis vi ikke hører fra deg innen' ) && false !== strpos( $cm[0]['message'], 'refunderer vi varen' ), 'customer email shows the deadline sentence' );
+t_ok( $cm && false !== strpos( $cm[0]['message'], 'Hvis vi ikke hører fra deg innen' ) && false !== strpos( $cm[0]['message'], 'refunderer vi det som mangler' ), 'customer email shows the deadline sentence' );
 t_ok( call( 'get_next_reminder_timestamp', $o ) < $d['deadline_at'], 'reminder comes before the deadline' );
 // No reminder that would only arrive after the deadline.
 set_line( $o->get_id(), $iid, array( 'deadline_at' => time() + DAY_IN_SECONDS ) );
@@ -512,7 +512,7 @@ t_eq( 'delete_applied', $d['status'], 'refund: line resolved' );
 t_eq( 200.0, (float) $o->get_total_refunded(), 'refund: 2 x 100 recorded' );
 t_eq( 2, absint( $o->get_qty_refunded_for_item( $iid ) ), 'refund: attributed to the line' );
 t_eq( $total_before, (float) $o->get_total(), 'refund: order total itself unchanged (line kept for accounting)' );
-t_ok( notes_contain( customer_notes( $o->get_id() ), 'Vi fikk ikke svar fra deg innen fristen. Vi har fjernet Bleier str 4 (2 stk) og refundert' ), 'customer note explains the automatic refund' );
+t_ok( notes_contain( customer_notes( $o->get_id() ), 'Vi fikk ikke svar fra deg innen fristen. Vi har fjernet Bleier str 4 (2 stk), og du får' ), 'customer note explains the automatic refund' );
 t_ok( notes_contain( internal_notes( $o->get_id() ), 'Decision deadline passed without an answer' ), 'internal note about the automatic action' );
 $dl = hooks_named( 'lp_missing_deadline_action' );
 t_eq( 1, count( $dl ), 'lp_missing_deadline_action fired' );
@@ -651,7 +651,7 @@ $iid = first_item_id( $o );
 $GLOBALS['lp_mails'] = array();
 admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1' ) ) );
 $cm = mails_with_subject( 'Velg erstatning' );
-t_ok( $cm && false !== strpos( $cm[0]['message'], 'fjerner vi varen fra ordren' ) && false === strpos( $cm[0]['message'], 'refunderer' ), 'unpaid order: email promises removal, not a refund' );
+t_ok( $cm && false !== strpos( $cm[0]['message'], 'fjerner vi det som mangler fra ordren' ) && false === strpos( $cm[0]['message'], 'refunderer' ), 'unpaid order: email promises removal, not a refund' );
 
 // Deadline switched off: jobs are dropped and nothing happens.
 $o   = paid_order( $A, 2 );
@@ -674,7 +674,7 @@ $GLOBALS['lp_mails'] = array();
 admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1', 'notes' => 'Utsolgt hos leverandør' ) ) );
 $m = mails_with_subject( 'Velg erstatning' );
 t_ok( $m && false !== strpos( $m[0]['message'], 'Hilsen oss på ' . get_bloginfo( 'name' ) . ' – ordre ' . $o->get_order_number() ), 'additional content with placeholders' );
-t_ok( $m && false !== strpos( $m[0]['message'], 'fjerner vi varen fra ordren' ), 'deadline sentence follows the configured action' );
+t_ok( $m && false !== strpos( $m[0]['message'], 'fjerner vi det som mangler fra ordren' ), 'deadline sentence follows the configured action' );
 unset( $email->settings['additional_content'] );
 $email->settings['email_type'] = 'plain';
 $email->email_type             = 'plain';

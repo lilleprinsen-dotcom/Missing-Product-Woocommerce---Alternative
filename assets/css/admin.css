@@ -1,21 +1,187 @@
 /* Missing Product WooCommerce Alternative: order screen and order list. */
 
-/* Order box: one block per order line. */
-.lp-missing-item {
-    border-bottom: 1px solid #ddd;
+/* Order box: a summary, then one row per order line. */
+.lp-missing-metabox .select2-container {
+    width: 100% !important;
+}
+
+.lp-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 4px 0 10px;
+    border-bottom: 1px solid #f0f0f1;
+}
+
+.lp-summary__empty {
+    margin: 0;
+    color: #50575e;
+}
+
+.lp-pill,
+.lp-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.6;
+    background: #f0f0f1;
+    color: #1d2327;
+    white-space: nowrap;
+}
+
+.lp-pill--ready,
+.lp-badge--chosen_alt,
+.lp-badge--chosen_delete,
+.lp-badge--declined {
+    background: #edfaef;
+    color: #00561b;
+}
+
+.lp-pill--attention,
+.lp-badge--attention {
+    background: #fcf0f1;
+    color: #8a2424;
+}
+
+.lp-pill--waiting,
+.lp-badge--waiting {
+    background: #fcf9e8;
+    color: #6b4e00;
+}
+
+.lp-pill--done {
+    background: #f0f6fc;
+    color: #0a4b78;
+}
+
+.lp-line {
     padding: 10px 0;
+    border-bottom: 1px solid #f0f0f1;
 }
 
-.lp-missing-field {
+.lp-line:last-child {
+    border-bottom: 0;
+}
+
+.lp-line__head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.lp-line__thumb {
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border-radius: 4px;
+    object-fit: cover;
+    background: #f6f7f7;
+}
+
+.lp-line__title {
+    flex: 1;
+    min-width: 0;
+}
+
+.lp-line__name {
+    font-weight: 600;
+    color: #1d2327;
+}
+
+.lp-line__qty {
+    margin-left: 2px;
+    color: #646970;
+}
+
+.lp-line__sub {
+    display: block;
+    font-size: 12px;
+    color: #646970;
+}
+
+.lp-line__side {
+    flex: none;
+}
+
+/* An open case keeps its (hidden) checkbox; WordPress styles would otherwise show it. */
+.lp-line__side .lp-missing-toggle[hidden] {
+    display: none !important;
+}
+
+/* «Missing»: a button-looking label around a visually hidden checkbox. */
+.lp-mark input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+}
+
+.lp-mark:focus-within {
+    box-shadow: 0 0 0 2px #2271b1;
+}
+
+.lp-line.is-marked .lp-mark {
+    background: #fcf0f1;
+    border-color: #d63638;
+    color: #8a2424;
+}
+
+.lp-line__body {
+    margin-left: 50px;
+}
+
+.lp-new-case[hidden] {
+    display: none;
+}
+
+/* Without the script the case fields still open with the checkbox. */
+.lp-line:has(.lp-mark .lp-missing-toggle:checked) .lp-new-case {
+    display: block;
+}
+
+.lp-editor {
+    display: grid;
+    gap: 12px;
     margin-top: 8px;
+    padding: 12px;
+    background: #f6f7f7;
+    border: 1px solid #dcdcde;
+    border-radius: 6px;
 }
 
-.lp-missing-inline + .lp-missing-inline {
-    margin-left: 12px;
+.lp-editor__label {
+    display: block;
+    margin-bottom: 4px;
+    font-weight: 600;
 }
 
-.lp-missing-qty {
-    width: 80px;
+.lp-optional,
+.lp-editor__hint {
+    font-weight: 400;
+    color: #646970;
+}
+
+.lp-editor__row--qty .lp-editor__label {
+    display: inline-block;
+    margin: 0 8px 0 0;
+}
+
+.lp-stepper {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.lp-stepper .lp-missing-qty {
+    width: 56px;
+    text-align: center;
+}
+
+.lp-stepper .lp-step {
+    min-width: 32px;
+    font-weight: 600;
 }
 
 .lp-missing-textarea,
@@ -23,12 +189,180 @@
     width: 100%;
 }
 
-.lp-missing-variants-row {
-    margin: 6px 0 0;
+.lp-presets {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #646970;
 }
 
-.lp-missing-variants-status {
-    margin-left: 4px;
+.lp-preset {
+    margin-right: 10px;
+}
+
+.lp-edit,
+.lp-internal {
+    margin-top: 6px;
+}
+
+.lp-edit > summary,
+.lp-internal > summary,
+.lp-more > summary {
+    cursor: pointer;
+    color: #2271b1;
+}
+
+.lp-internal .lp-missing-textarea {
+    margin-top: 6px;
+}
+
+.lp-line__facts {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: #646970;
+}
+
+/* What the customer answered, and the buttons that apply it. */
+.lp-decision {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    background: #edfaef;
+    border: 1px solid #b8e6bf;
+    border-radius: 6px;
+}
+
+.lp-decision--chosen_delete,
+.lp-decision--declined {
+    display: block;
+    background: #fcf9e8;
+    border-color: #f0e0a8;
+}
+
+.lp-decision--attention,
+.lp-decision--warning {
+    display: block;
+    background: #fcf0f1;
+    border-color: #f5c2c4;
+}
+
+.lp-decision__text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.lp-decision__what {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.lp-decision__money--invoice {
+    color: #8a2424;
+}
+
+.lp-decision__partial {
+    color: #50575e;
+}
+
+.lp-missing-apply.is-busy {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+.lp-decision__warning {
+    font-weight: 600;
+    color: #d63638;
+}
+
+.lp-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.lp-line__cancel {
+    margin: 10px 0 0;
+}
+
+.lp-line__cancel .lp-cancel-case {
+    color: #b32d2e;
+}
+
+.lp-line.is-cancelling .lp-line__head,
+.lp-line.is-cancelling .lp-decision {
+    opacity: 0.55;
+}
+
+.lp-line__done {
+    margin: 6px 0 0;
+    color: #00561b;
+}
+
+.lp-line__done .dashicons {
+    color: #00a32a;
+}
+
+.lp-actions__hint {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: #646970;
+}
+
+.lp-box-warning {
+    margin: 10px 0 0;
+    padding: 8px 12px;
+    background: #fcf0f1;
+    border-left: 4px solid #d63638;
+    color: #8a2424;
+}
+
+a.lp-pill {
+    text-decoration: none;
+}
+
+/* Unsaved changes: save from the box. */
+.lp-savebar {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 10px -12px -12px;
+    padding: 10px 12px;
+    background: #fff8e5;
+    border-top: 1px solid #f0c33c;
+}
+
+.lp-savebar[hidden] {
+    display: none;
+}
+
+@media (max-width: 782px) {
+    .lp-line__head {
+        flex-wrap: wrap;
+    }
+
+    .lp-line__side {
+        box-sizing: border-box;
+        flex-basis: 100%;
+        padding-left: 50px;
+    }
+
+    .lp-preset {
+        display: inline-block;
+        padding: 6px 0;
+    }
+
+    .lp-line__body {
+        margin-left: 0;
+    }
 }
 
 /* Preview of the chosen alternatives: price for this order, difference and stock. */
@@ -95,35 +429,30 @@
     color: #d63638;
 }
 
-/* Line status and history. */
-.lp-missing-status {
-    margin-top: 8px;
-    padding: 10px;
-    background: #f8f8f8;
-    border: 1px solid #e2e2e2;
-}
-
-.lp-missing-status__intro {
-    margin: 8px 0 4px;
-}
-
-.lp-missing-history {
-    margin: 6px 0 0;
-    font-size: 12px;
-    color: #50575e;
-}
-
-.lp-missing-metabox .lp-missing-apply {
-    margin: 4px 4px 0 0;
-}
-
-/* Order-level tools: portal email and customer link. */
+/* Customer page tools below the lines. */
 .lp-missing-admin-actions {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-    margin-top: 12px;
+    margin-top: 8px;
+    padding-top: 10px;
+    border-top: 1px solid #f0f0f1;
+}
+
+.lp-tools__label {
+    margin-right: 2px;
+    color: #646970;
+}
+
+.lp-more {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.lp-more > summary {
+    padding: 0 6px;
 }
 
 .lp-missing-admin-actions .lp-missing-link-field {
@@ -136,6 +465,16 @@
 
 .lp-missing-copy-status:empty {
     display: none;
+}
+
+.lp-missing-status {
+    margin-top: 8px;
+}
+
+.lp-missing-history {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: #50575e;
 }
 
 /* Order list column. */
@@ -152,9 +491,12 @@
     color: #00a32a;
 }
 
-.lp-missing-state--attention .dashicons,
-.lp-missing-state--open .dashicons {
+.lp-missing-state--attention .dashicons {
     color: #d63638;
+}
+
+.lp-missing-state--open .dashicons {
+    color: #dba617;
 }
 
 .lp-missing-state--resolved .dashicons {

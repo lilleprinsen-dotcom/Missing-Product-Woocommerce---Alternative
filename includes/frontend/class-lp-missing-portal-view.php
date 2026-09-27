@@ -452,9 +452,9 @@ class LP_Missing_Portal_View {
             /* translators: %1$s: remaining quantity */
             'partial'        => __( 'Resten (%1$s stk) blir stående åpen til vi får nytt valg.', 'lp-missing' ),
             /* translators: 1: product name, 2: missing quantity */
-            'decline'        => __( '%1$s: Nei takk. Du betaler ikke for de %2$s stk som mangler.', 'lp-missing' ),
+            'decline'        => __( '%1$s: Nei takk. Du betaler ikke for det som mangler (%2$s stk).', 'lp-missing' ),
             /* translators: 1: product name, 2: missing quantity */
-            'delete'         => __( '%1$s: Fjernes fra ordren. Du betaler ikke for de %2$s stk som mangler.', 'lp-missing' ),
+            'delete'         => __( '%1$s: Fjernes fra ordren. Du betaler ikke for det som mangler (%2$s stk).', 'lp-missing' ),
             /* translators: %1$s: total surcharge */
             'total_charged'  => __( 'Mellomlegg som faktureres i en egen ordre: %1$s.', 'lp-missing' ),
             'total_none'     => __( 'Ingen ekstra kostnad for deg.', 'lp-missing' ),

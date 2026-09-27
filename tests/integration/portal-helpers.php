@@ -2,6 +2,7 @@
 // Customer portal request simulation for the integration tests: runs the template_redirect handler and the shortcode
 // like one front-end request, with a cookie jar, captured redirects (URL + status), cookies and private headers.
 // Require after bootstrap.php.
+defined( 'ABSPATH' ) || exit; // Runs inside WordPress (wp eval-file), never over HTTP.
 
 $GLOBALS['lp_jar']             = array();
 $GLOBALS['lp_cookie_log']      = array();

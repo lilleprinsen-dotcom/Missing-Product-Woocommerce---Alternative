@@ -15,6 +15,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class LP_Missing_Lifecycle {
+    /** @var bool Set while the plugin itself refunds a line (no reconciling of that line). */
+    public static $pause_reconcile = false;
+
     /** @var array Orders that got the customer email in this request (order_id => true). */
     protected static $auto_email_sent = array();
     /** @var int Batch nesting depth; queued order work runs when the outermost batch ends. */
@@ -32,6 +35,7 @@ class LP_Missing_Lifecycle {
         add_action( 'lp_missing_item_updated', array( __CLASS__, 'handle_item_updated' ), 10, 4 );
         add_action( LP_Missing_Scheduler::REMINDER_HOOK, array( __CLASS__, 'handle_order_reminder' ) );
         add_action( LP_Missing_Scheduler::DEADLINE_HOOK, array( __CLASS__, 'handle_deadline' ) );
+        add_action( LP_Missing_Scheduler::CUSTOMER_NOTE_HOOK, array( 'LP_Missing_Apply_Service', 'flush_customer_notes' ) );
         add_action( LP_Missing_Scheduler::LEGACY_REMINDER_HOOK, array( __CLASS__, 'handle_scheduled_reminder' ), 10, 2 );
         add_action( LP_Missing_Plugin::CLEANUP_HOOK, array( __CLASS__, 'handle_cleanup_order' ) );
         add_action( LP_Missing_Plugin::DAILY_CLEANUP_HOOK, array( __CLASS__, 'run_daily_cleanup' ) );
@@ -47,6 +51,12 @@ class LP_Missing_Lifecycle {
         }
         add_action( 'woocommerce_trash_order', array( __CLASS__, 'handle_order_status_change' ), 20 );
         add_action( 'woocommerce_untrash_order', array( __CLASS__, 'handle_order_status_change' ), 20 );
+        // Legacy storage restores orders as posts without the WooCommerce hook.
+        add_action( 'untrashed_post', array( __CLASS__, 'handle_post_untrashed' ), 20 );
+        // Staff changed line quantities in the order editor, or refunded units: keep open cases within the line.
+        add_action( 'woocommerce_saved_order_items', array( __CLASS__, 'reconcile_line_quantities' ), 20 );
+        add_action( 'woocommerce_order_refunded', array( __CLASS__, 'handle_external_refund' ), 10, 2 );
+        add_action( 'woocommerce_order_refunded', array( __CLASS__, 'reconcile_line_quantities' ), 20 );
         add_action( 'woocommerce_delete_order', array( __CLASS__, 'handle_order_deleted' ), 20 );
         add_action( 'woocommerce_before_delete_order_item', array( __CLASS__, 'remember_deleted_item' ), 20 );
         add_action( 'woocommerce_delete_order_item', array( __CLASS__, 'handle_order_item_deleted' ), 20 );
@@ -124,6 +134,9 @@ class LP_Missing_Lifecycle {
         if ( ! $order instanceof WC_Order ) {
             return;
         }
+        // Work on the order as it is now: a status change queued mid-request (e.g. untrash) may not be in the copy.
+        $fresh = wc_get_order( $order->get_id() );
+        $order = $fresh instanceof WC_Order ? $fresh : $order;
         if ( $work['staff'] ) {
             LP_Missing_Notifier::send_staff_decision_email( $order, $work['staff'] );
         }
@@ -685,9 +698,116 @@ class LP_Missing_Lifecycle {
         }
     }
 
+    public static function handle_post_untrashed( $post_id ) {
+        if ( 'shop_order' === get_post_type( $post_id ) ) {
+            self::handle_order_status_change( $post_id );
+        }
+    }
+
+    /**
+     * A line's quantity was lowered below its open missing quantity (order item editor): lower the missing quantity
+     * and its stock lock to what is left, and flag the line so staff check what the customer was told.
+     */
+    public static function reconcile_line_quantities( $order_id ) {
+        if ( self::$pause_reconcile ) {
+            // The plugin's own refund (the line is resolved right after).
+            return;
+        }
+        $order = wc_get_order( $order_id );
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        $changed = false;
+        foreach ( $order->get_items( 'line_item' ) as $item_id => $item ) {
+            if ( ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
+                continue;
+            }
+            $data      = LP_Missing_Line::get_item_data( $item );
+            $available = LP_Missing_Line::get_item_available_qty( $item );
+            if ( empty( $data['missing'] ) || LP_Missing_Line::is_line_resolved( $data ) || $data['qty_missing'] <= $available ) {
+                continue;
+            }
+            $new                    = $data;
+            $new['qty_missing']     = max( 1, $available );
+            $new['needs_attention'] = true;
+            $new['last_updated']    = time();
+            LP_Missing_Stock::maybe_adjust_stock( $item, $data, $new, $order );
+            $item->update_meta_data( LP_Missing_Plugin::META_KEY, $new );
+            $item->save();
+            $order->add_order_note(
+                sprintf(
+                    /* translators: 1: product name, 2: new missing quantity */
+                    __( 'Fewer units of %1$s are left on the order (edited or refunded), so its missing quantity is now %2$d. Check the case.', 'lp-missing' ),
+                    $item->get_name(),
+                    $new['qty_missing']
+                )
+            );
+            $changed = true;
+        }
+        if ( $changed ) {
+            LP_Missing_Orders::refresh_order_flags( $order );
+            self::queue( $order );
+        }
+    }
+
+    /**
+     * Staff refunded units of a line in WooCommerce while its missing-item case was open. That refund settles the
+     * missing units (up to the missing quantity), so the plugin never refunds or replaces them a second time.
+     */
+    public static function handle_external_refund( $order_id, $refund_id ) {
+        if ( self::$pause_reconcile ) {
+            return;
+        }
+        $order  = wc_get_order( $order_id );
+        $refund = wc_get_order( $refund_id );
+        if ( ! $order instanceof WC_Order || ! $refund instanceof WC_Order_Refund ) {
+            return;
+        }
+        $changed = false;
+        foreach ( $refund->get_items( 'line_item' ) as $refund_item ) {
+            $item_id = absint( $refund_item->get_meta( '_refunded_item_id', true ) );
+            $qty     = absint( $refund_item->get_quantity() );
+            $item    = $item_id && $qty ? $order->get_item( $item_id, false ) : null;
+            if ( ! $item instanceof WC_Order_Item_Product || ! $item->meta_exists( LP_Missing_Plugin::META_KEY ) ) {
+                continue;
+            }
+            $data = LP_Missing_Line::get_item_data( $item );
+            if ( empty( $data['missing'] ) || LP_Missing_Line::is_line_resolved( $data ) ) {
+                continue;
+            }
+            $new                 = $data;
+            $new['qty_missing']  = max( 0, absint( $data['qty_missing'] ) - $qty );
+            $new['last_updated'] = time();
+            if ( $new['qty_missing'] < 1 ) {
+                $new['status']                 = 'delete_applied';
+                $new['missing']                = false;
+                $new['pricing_snapshot']       = array();
+                $new['needs_attention']        = false;
+                $new['reminder_scheduled_for'] = 0;
+                $new['resolved_at']            = time();
+                /* translators: 1: quantity, 2: product name */
+                $note = sprintf( __( '%1$d × %2$s was refunded in WooCommerce, so its missing-item case is closed. If the refund was for something else, press «Missing again» on the line.', 'lp-missing' ), $qty, $item->get_name() );
+            } else {
+                $new['needs_attention'] = true;
+                /* translators: 1: quantity, 2: product name, 3: quantity still missing */
+                $note = sprintf( __( '%1$d × %2$s was refunded in WooCommerce, so %3$d is still missing. Check the case.', 'lp-missing' ), $qty, $item->get_name(), $new['qty_missing'] );
+            }
+            LP_Missing_Stock::maybe_adjust_stock( $item, $data, $new, $order );
+            $item->update_meta_data( LP_Missing_Plugin::META_KEY, $new );
+            $item->save();
+            $order->add_order_note( $note );
+            do_action( 'lp_missing_item_updated', $order, $item_id, $new, $data );
+            $changed = true;
+        }
+        if ( $changed ) {
+            LP_Missing_Orders::refresh_order_flags( $order );
+            self::queue( $order );
+        }
+    }
+
     public static function handle_order_deleted( $order_id ) {
         $args = array( absint( $order_id ) );
-        foreach ( array( LP_Missing_Scheduler::REMINDER_HOOK, LP_Missing_Scheduler::DEADLINE_HOOK, LP_Missing_Plugin::CLEANUP_HOOK ) as $hook ) {
+        foreach ( array( LP_Missing_Scheduler::REMINDER_HOOK, LP_Missing_Scheduler::DEADLINE_HOOK, LP_Missing_Scheduler::CUSTOMER_NOTE_HOOK, LP_Missing_Plugin::CLEANUP_HOOK ) as $hook ) {
             LP_Missing_Scheduler::unschedule( $hook, $args );
         }
         self::clear_legacy_reminders( $order_id );

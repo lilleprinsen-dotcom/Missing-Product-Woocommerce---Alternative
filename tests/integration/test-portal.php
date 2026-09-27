@@ -2,6 +2,7 @@
 // Customer portal tests: links v1/v2 (expiry, revocation, key rotation), session cookie, email confirmation,
 // staff preview, decisions (PRG, change, hooks), rate limit, stock, texts, headers, accessibility markup, page setup.
 // Run with: wp eval-file tests/integration/test-portal.php (see tests/README.md).
+defined( 'ABSPATH' ) || exit; // Runs inside WordPress (wp eval-file), never over HTTP.
 require __DIR__ . '/bootstrap.php';
 require __DIR__ . '/portal-helpers.php';
 

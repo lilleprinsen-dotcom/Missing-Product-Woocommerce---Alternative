@@ -22,6 +22,7 @@ class LP_Missing_Scheduler {
     const GROUP                = 'lp-missing';
     const REMINDER_HOOK        = 'lp_missing_order_reminder';
     const DEADLINE_HOOK        = 'lp_missing_order_deadline';
+    const CUSTOMER_NOTE_HOOK   = 'lp_missing_send_customer_notes';
     const LEGACY_REMINDER_HOOK = 'lp_missing_send_reminder';
     const MAINTENANCE_OPTION   = 'lp_missing_scheduler_checked';
     const MAINTENANCE_INTERVAL = 43200; // 12 hours.
@@ -40,6 +41,7 @@ class LP_Missing_Scheduler {
         return array(
             self::REMINDER_HOOK,
             self::DEADLINE_HOOK,
+            self::CUSTOMER_NOTE_HOOK,
             LP_Missing_Plugin::CLEANUP_HOOK,
             LP_Missing_Plugin::DAILY_CLEANUP_HOOK,
             self::LEGACY_REMINDER_HOOK,

@@ -146,11 +146,11 @@ const submit = (page, sel) => Promise.all([page.waitForNavigation(), page.click(
   ok(url.includes('action=edit') && (url.includes('id=' + fx.order2) || url.includes('post=' + fx.order2)), 'order Update stays on the order (not hijacked): ' + url);
   const upd = await admin.locator('#message, .notice').allInnerTexts();
   ok(upd.join(' ').match(/Order updated|updated/i), 'WooCommerce reports the order as updated');
-  const link = admin.locator('#lp_missing_metabox a.lp-missing-confirm', { hasText: 'Replace missing quantity' });
+  const link = admin.locator('#lp_missing_metabox a.lp-missing-confirm', { hasText: 'Replace the missing item' });
   ok(await link.count() === 1, 'apply link is present');
   await Promise.all([admin.waitForNavigation(), link.click()]);
   const notices = (await admin.locator('.notice').allInnerTexts()).join(' ');
-  ok(notices.includes('Customer decision applied'), 'apply link applies the decision: ' + notices.slice(0, 160));
+  ok(/Replaced 1 × E2E Bleier with E2E Bleier premium\./.test(notices), 'apply link applies the decision and says what it did: ' + notices.slice(0, 160));
   const status = await admin.locator('#lp_missing_metabox').innerText();
   ok(!status.includes('pending staff'), 'box no longer shows a pending decision');
 

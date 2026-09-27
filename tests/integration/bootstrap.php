@@ -1,6 +1,7 @@
 <?php
 // Shared helpers and store setup for the integration tests. Test files start with: require __DIR__ . '/bootstrap.php';
 // Uses the real WordPress + WooCommerce runtime (SQLite).
+defined( 'ABSPATH' ) || exit; // Runs inside WordPress (wp eval-file), never over HTTP.
 
 $GLOBALS['lp_fail'] = 0;
 $GLOBALS['lp_pass'] = 0;
@@ -44,6 +45,8 @@ function reset_request() {
 class LP_Redirect extends Exception {}
 add_filter( 'wp_redirect', function ( $location ) { throw new LP_Redirect( $location ); }, 1 );
 add_filter( 'pre_wp_mail', function ( $null, $atts ) { $GLOBALS['lp_mails'][] = $atts; return true; }, 10, 2 );
+// Customer notes about staff decisions go out right away in tests (a test sets a delay to check the collecting).
+add_filter( 'lp_missing_customer_note_delay', '__return_zero' );
 
 // ---------- Store setup ----------
 update_option( 'woocommerce_calc_taxes', 'yes' );

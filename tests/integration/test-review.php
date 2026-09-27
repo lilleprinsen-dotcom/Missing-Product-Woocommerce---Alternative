@@ -1,6 +1,7 @@
 <?php
 // Regression tests for findings of the final review (stale screens, deadline safety, concurrency).
 // Run with: wp eval-file tests/integration/test-review.php (see tests/README.md).
+defined( 'ABSPATH' ) || exit; // Runs inside WordPress (wp eval-file), never over HTTP.
 require __DIR__ . '/bootstrap.php';
 require __DIR__ . '/portal-helpers.php';
 
@@ -51,7 +52,7 @@ wc_create_refund( array( 'amount' => 100, 'order_id' => $o->get_id(), 'line_item
 review_run_deadline( $o->get_id() );
 t_eq( 100.0, (float) wc_get_order( $o->get_id() )->get_total_refunded(), 'no second refund after staff refunded the unit themselves' );
 $d = item_data( $o->get_id(), $iid );
-t_ok( $d['needs_attention'] && $d['auto_action_failed_at'] > 0, 'line flagged for staff instead' );
+t_ok( 'delete_applied' === $d['status'] && empty( $d['missing'] ), 'the refund in WooCommerce settles the missing unit and closes the case' );
 $o   = make_order( $A, 3 );
 $iid = first_item_id( $o );
 admin_save( $o, array( $iid => array( 'missing' => '1', 'qty_missing' => '1' ) ) );
@@ -150,7 +151,7 @@ review_run_deadline( $o->get_id() );
 $notes = wc_get_order_notes( array( 'order_id' => $o->get_id() ) );
 $warned = false;
 foreach ( $notes as $n ) {
-	$warned = $warned || false !== strpos( $n->content, 'customer has paid for the removed quantity' );
+	$warned = $warned || false !== strpos( $n->content, 'The order is paid: if the payment is already charged, pay' );
 }
 t_ok( $warned, 'paid order: staff are told to release or refund the removed amount' );
 

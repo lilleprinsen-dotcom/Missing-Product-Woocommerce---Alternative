@@ -10,6 +10,27 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class LP_Missing_Pricing {
+    public static function register() {
+        add_filter( 'woocommerce_coupon_is_valid_for_product', array( __CLASS__, 'coupon_valid_for_replacement' ), 10, 4 );
+    }
+
+    /**
+     * A replacement line carries the price (and discount) of the item it replaces. When WooCommerce recalculates the
+     * order's coupons, a coupon limited to certain products must treat the replacement like the original product, or
+     * the discount would move (or disappear) and the order total change.
+     */
+    public static function coupon_valid_for_replacement( $valid, $product, $coupon, $values ) {
+        if ( ! $values instanceof WC_Order_Item_Product || ! $coupon instanceof WC_Coupon ) {
+            return $valid;
+        }
+        $original_id = absint( $values->get_meta( '_lp_missing_alt_original_product_id', true ) );
+        $original    = $original_id ? wc_get_product( $original_id ) : null;
+        if ( ! $original instanceof WC_Product || ( $product instanceof WC_Product && $product->get_id() === $original->get_id() ) ) {
+            return $valid;
+        }
+        return $coupon->is_valid_for_product( $original );
+    }
+
     /**
      * Rebuild order tax lines from the line item tax data and re-sum totals, without re-rating taxes.
      */
@@ -20,38 +41,80 @@ class LP_Missing_Pricing {
 
     /**
      * The part of a line's subtotal, total and per-rate taxes that belongs to $qty billable units.
+     *
+     * The split is made on the gross amount the customer sees (net + VAT), rounded to the shop's price decimals: the
+     * moved units get what a line of the remaining units would lose, so 3 × 19.99 splits into 19.99 + 39.98 (not
+     * 19.98 + 39.99), also with 0 price decimals. VAT is split per rate the same way; net is gross minus VAT.
+     *
+     * @param WC_Order_Item_Product $item       Line.
+     * @param int                   $qty        Units.
+     * @param bool                  $unrefunded Split what is not refunded yet (for a refund), so the last refunded
+     *                                          unit takes the exact remainder of the line.
      */
-    public static function get_item_share( $item, $qty ) {
+    public static function get_item_share( $item, $qty, $unrefunded = false ) {
         $billable = LP_Missing_Line::get_item_billable_qty( $item );
-        $qty      = max( 0, min( absint( $qty ), $billable ) );
-        $ratio    = $billable > 0 ? $qty / $billable : 0;
         $taxes    = $item->get_taxes();
-        // Net amounts are kept unrounded like WooCommerce stores them, so splitting never drifts.
-        $share    = array(
+        $base     = array(
+            'total'    => array(
+                'qty'   => $billable,
+                'net'   => (float) $item->get_total(),
+                'taxes' => ! empty( $taxes['total'] ) && is_array( $taxes['total'] ) ? array_map( 'floatval', $taxes['total'] ) : array(),
+            ),
+            'subtotal' => array(
+                'qty'   => $billable,
+                'net'   => (float) $item->get_subtotal(),
+                'taxes' => ! empty( $taxes['subtotal'] ) && is_array( $taxes['subtotal'] ) ? array_map( 'floatval', $taxes['subtotal'] ) : array(),
+            ),
+        );
+        $order = $unrefunded ? $item->get_order() : null;
+        if ( $order instanceof WC_Order ) {
+            // Refunds are recorded against the line total and its taxes only.
+            $base['total']['qty'] = max( 0, $billable - absint( $order->get_qty_refunded_for_item( $item->get_id() ) ) );
+            $base['total']['net'] = max( 0, $base['total']['net'] - (float) $order->get_total_refunded_for_item( $item->get_id() ) );
+            foreach ( $base['total']['taxes'] as $rate_id => $amount ) {
+                $base['total']['taxes'][ $rate_id ] = max( 0, $amount - (float) $order->get_tax_refunded_for_item( $item->get_id(), $rate_id ) );
+            }
+        }
+        $qty   = max( 0, min( absint( $qty ), $base['total']['qty'] ) );
+        $share = array(
             'qty'      => $qty,
-            'subtotal' => wc_format_decimal( (float) $item->get_subtotal() * $ratio ),
-            'total'    => wc_format_decimal( (float) $item->get_total() * $ratio ),
+            'subtotal' => 0,
+            'total'    => 0,
             'taxes'    => array(
                 'total'    => array(),
                 'subtotal' => array(),
             ),
         );
+        $decimals       = wc_get_price_decimals();
         $round_per_line = 'yes' !== get_option( 'woocommerce_tax_round_at_subtotal' );
-        foreach ( array( 'total', 'subtotal' ) as $type ) {
-            if ( empty( $taxes[ $type ] ) || ! is_array( $taxes[ $type ] ) ) {
+        foreach ( $base as $type => $line ) {
+            $ratio = $line['qty'] > 0 ? min( 1, $qty / $line['qty'] ) : 0;
+            if ( $ratio >= 1 || $ratio <= 0 ) {
+                // All of it (exactly what is left) or nothing.
+                $factor                  = $ratio >= 1 ? 1 : 0;
+                $share[ $type ]          = wc_format_decimal( $line['net'] * $factor );
+                $share['taxes'][ $type ] = array_map(
+                    function ( $amount ) use ( $factor ) {
+                        return wc_format_decimal( $amount * $factor );
+                    },
+                    $line['taxes']
+                );
                 continue;
             }
-            foreach ( $taxes[ $type ] as $rate_id => $amount ) {
-                $amount = (float) $amount;
-                if ( $round_per_line ) {
-                    // Line taxes are rounded per line: give the remaining units the tax a fresh line of that size would
-                    // have, and the moved share the rest, so both rounded lines add up to the original rounded tax.
-                    $share_tax = wc_round_tax_total( $amount ) - wc_round_tax_total( $amount * ( 1 - $ratio ) );
-                } else {
-                    $share_tax = $amount * $ratio;
-                }
-                $share['taxes'][ $type ][ $rate_id ] = wc_format_decimal( $share_tax );
+            $tax_share = array();
+            foreach ( $line['taxes'] as $rate_id => $amount ) {
+                // With taxes rounded per line, both the moved and the remaining part stay rounded amounts.
+                $tax_share[ $rate_id ] = $round_per_line ? wc_round_tax_total( $amount ) - wc_round_tax_total( $amount * ( 1 - $ratio ) ) : $amount * $ratio;
             }
+            $gross       = $line['net'] + array_sum( $line['taxes'] );
+            $gross_share = round( $gross, $decimals ) - round( $gross * ( 1 - $ratio ), $decimals );
+            $net_share   = $gross_share - array_sum( $tax_share );
+            if ( $net_share < -0.000001 || $net_share > $line['net'] + 0.000001 ) {
+                // Only on odd lines (e.g. VAT larger than the net after discounts): fall back to a plain split.
+                $net_share = $line['net'] * $ratio;
+            }
+            $share[ $type ]          = wc_format_decimal( $net_share );
+            $share['taxes'][ $type ] = array_map( 'wc_format_decimal', $tax_share );
         }
         return $share;
     }
@@ -79,13 +142,13 @@ class LP_Missing_Pricing {
      * alternative compares as "same price" also on discounted orders.
      */
     public static function get_item_unit_price_incl_tax( $item ) {
-        $qty   = LP_Missing_Line::get_item_billable_qty( $item );
+        $qty   = max( 1, LP_Missing_Line::get_item_billable_qty( $item ) );
         $total = floatval( $item->get_subtotal() ) + floatval( $item->get_subtotal_tax() );
         return $total / $qty;
     }
 
     public static function get_item_unit_price_excl_tax( $item ) {
-        $qty   = LP_Missing_Line::get_item_billable_qty( $item );
+        $qty   = max( 1, LP_Missing_Line::get_item_billable_qty( $item ) );
         $total = floatval( $item->get_subtotal() );
         return $total / $qty;
     }
